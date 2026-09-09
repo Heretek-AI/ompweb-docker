@@ -134,6 +134,7 @@ jobs:
 
       # Compose the final tag/label list from whichever metadata step ran.
       # Use bash ${VAR:-fallback} so an empty string falls through cleanly.
+      # Multi-line outputs require GitHub's heredoc form: <<DELIMITER.
       - name: Collect metadata outputs
         id: meta
         env:
@@ -146,9 +147,15 @@ jobs:
           MANUAL_TAGS: ${{ steps.meta-manual.outputs.tags }}
           MANUAL_LABELS: ${{ steps.meta-manual.outputs.labels }}
         run: |
+          TAGS="${BRANCH_TAGS:-${TAG_TAGS:-${PR_TAGS:-${MANUAL_TAGS:-}}}}"
+          LABELS="${BRANCH_LABELS:-${TAG_LABELS:-${PR_LABELS:-${MANUAL_LABELS:-}}}}"
           {
-            echo "tags=${BRANCH_TAGS:-${TAG_TAGS:-${PR_TAGS:-${MANUAL_TAGS:-}}}}"
-            echo "labels=${BRANCH_LABELS:-${TAG_LABELS:-${PR_LABELS:-${MANUAL_LABELS:-}}}}"
+            echo "tags<<__OMPWEB_META_EOF__"
+            echo "${TAGS}"
+            echo "__OMPWEB_META_EOF__"
+            echo "labels<<__OMPWEB_META_EOF__"
+            echo "${LABELS}"
+            echo "__OMPWEB_META_EOF__"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
