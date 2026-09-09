@@ -30,8 +30,13 @@ fi
 # write here at runtime, so we create the directory and chown it to
 # the app user. Idempotent on subsequent runs.
 mkdir -p "$AGENT_DIR"
-chmod 0755 "$AGENT_DIR"  # ensure root can re-chown if omp sets 0700 inside
-chown -R 1001:1001 "$AGENT_DIR"
+# chmod and chown are best-effort on subsequent starts — if omp has
+# created internal dirs at mode 0700 owned by app, root can re-chown
+# them only if CAP_DAC_OVERRIDE works for the underlying filesystem
+# (btrfs + seclabel can refuse). Failing to chmod is non-fatal: chown
+# of the top-level dir is enough for the app user to write.
+chmod 0755 "$AGENT_DIR" || true
+chown -R 1001:1001 "$AGENT_DIR" || true
 
 echo "Starting ompweb on ${HOST}:${PORT} (agent dir: ${AGENT_DIR})"
 
