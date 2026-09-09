@@ -9,7 +9,7 @@ services:
   ompweb:
     # Override GHCR_OWNER in .env if you forked this repo. The default assumes
     # the canonical org is kahme247; change to your own namespace if you forked.
-    image: ghcr.io/${GHCR_OWNER:-kahme247}/ompweb:${TAG:-latest}
+    image: ghcr.io/${GHCR_OWNER:-heretek-ai}/ompweb:${TAG:-latest}
     container_name: ompweb
     restart: unless-stopped
 
