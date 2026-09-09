@@ -1,0 +1,50 @@
+# docker-compose.yml — quick-start for ompweb + oh-my-pi.
+#
+# 1. cp .env.example .env && edit .env (set OMP_WEB_PASSWORD at least)
+# 2. docker compose pull   # fetch the latest image
+# 3. docker compose up -d
+# 4. open http://localhost:30177
+
+services:
+  ompweb:
+    # Override GHCR_OWNER in .env if you forked this repo. The default assumes
+    # the canonical org is kahme247; change to your own namespace if you forked.
+    image: ghcr.io/${GHCR_OWNER:-kahme247}/ompweb:${TAG:-latest}
+    container_name: ompweb
+    restart: unless-stopped
+
+    # tini is baked into the image's ENTRYPOINT, so we don't need Compose's init.
+
+    # Lock down the container.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    user: "1001:1001"
+
+    ports:
+      - "30177:30177"
+
+    env_file:
+      - .env
+
+    volumes:
+      # Persistent agent state: omp config, session index, models, etc.
+      - ompweb_data:/data
+
+      # OPTIONAL: bind-mount your source code so omp can edit it.
+      # Uncomment the next line and set WORKSPACE_DIR in .env to point at
+      # the directory you want omp to work on.
+      # - ${WORKSPACE_DIR:-./workspace}:/workspace
+
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:30177/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  ompweb_data:
+    # Named volume (managed by Docker, portable across hosts).
+    name: ompweb_data

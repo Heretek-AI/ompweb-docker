@@ -1,0 +1,29 @@
+# Build context is just the Docker wrapper files in this repo — ompweb source is
+# cloned inside the Dockerfile, so anything heavy we add here slows builds and
+# inflates the build context.
+.git
+.github
+node_modules
+.next
+out
+dist
+build
+coverage
+.vscode
+.idea
+.DS_Store
+*.log
+*.tmp
+*.swp
+
+# Don't leak local secrets into the image (the .env file is read at runtime, not build).
+.env
+.env.*
+!.env.example
+
+# Documentation is not needed in the image.
+*.md
+!README.md
+
+# CI artifacts.
+.claude

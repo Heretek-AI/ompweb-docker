@@ -1,0 +1,48 @@
+# Caddyfile — drop-in reverse proxy for ompweb.
+#
+# Usage:
+#   1. Replace ompweb.example.com below with your real domain (must point at
+#      this host's public IP via DNS for the Let's Encrypt challenge to succeed).
+#   2. Drop this file at /etc/caddy/Caddyfile (or wherever your Caddy config lives).
+#   3. `caddy run` (or `systemctl reload caddy` if running under systemd).
+#
+# Caddy will automatically fetch and renew a Let's Encrypt certificate. No
+# additional config is needed.
+
+ompweb.example.com {
+    encode zstd gzip
+
+    reverse_proxy 127.0.0.1:30177 {
+        # Pass client info to ompweb so its auth check sees the real IP.
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Real-IP {remote_host}
+
+        # The container already exposes 30177 — give it plenty of room for
+        # long-running AI prompts.
+        transport http {
+            dial_timeout 30s
+            response_header_timeout 0   # 0 = no timeout
+            read_timeout 0
+            write_timeout 0
+        }
+    }
+
+    # OPTIONAL: add HTTP Basic Auth in front of the ompweb password. Useful
+    # if you want a second factor or want to share with multiple people
+    # without sharing the ompweb password.
+    #
+    # Generate the hash with: caddy hash-password
+    # basic_auth {
+    #     admin JDJhJDE0JE5sSzhQ...
+    # }
+
+    # OPTIONAL: rate-limit abusive clients.
+    # rate_limit ompweb_zone
+}
+
+# If you also want to expose the site on a non-TLS port for local testing
+# only, listen on a separate hostname or path. Otherwise, delete this block.
+http://ompweb.local {
+    reverse_proxy 127.0.0.1:30177
+}
