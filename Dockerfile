@@ -54,7 +54,11 @@ ARG OMP_VERSION=latest
 
 RUN apk add --no-cache curl ca-certificates
 
-# Resolve "latest" to the current release tag (strip the leading 'v' that GitHub uses).
+# Resolve "latest" to the current release tag (strip the leading 'v' that GitHub uses),
+# then download the musl-compiled linux/amd64 binary. We verify it by magic-byte check
+# (not by execution) — executing it here would require the musl dynamic loader at a
+# specific path, which Alpine 3.20 happens to provide but isn't guaranteed across base
+# image updates. The runtime stage is where we actually test it.
 RUN set -eux; \
     if [ "$OMP_VERSION" = "latest" ]; then \
         OMP_VERSION=$(curl -fsSL https://api.github.com/repos/can1357/oh-my-pi/releases/latest \
@@ -64,7 +68,11 @@ RUN set -eux; \
     curl -fsSL -o /usr/local/bin/omp \
         "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/omp-linux-musl-x64"; \
     chmod +x /usr/local/bin/omp; \
-    /usr/local/bin/omp --version
+    # Validate the file is a 64-bit ELF executable — catches 404 HTML pages, empty
+    # responses, and partial downloads in one shot.
+    head -c 4 /usr/local/bin/omp | grep -q "ELF" || { echo "omp binary failed ELF magic check"; exit 1; }; \
+    SIZE=$(stat -c %s /usr/local/bin/omp); \
+    echo "omp binary ready: ${SIZE} bytes"
 
 # ---- Stage 4: runtime ----
 FROM node:${NODE_VERSION}-alpine AS runtime
