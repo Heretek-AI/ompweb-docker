@@ -50,6 +50,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # GHCR stores packages under lowercase org names. Docker's buildx
+      # silently lowercases on push, but Trivy's reference parser is
+      # stricter and rejects 'Heretek-AI' as malformed. Expose the
+      # lowercased name for downstream steps to use.
+      - name: Resolve image name (lowercase)
+        id: image
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
       # ---- Metadata: branch push to main → main, main-<sha>, latest ----
       - name: Extract Docker metadata (branch)
         id: meta-branch
@@ -168,7 +176,7 @@ jobs:
           # GHCR stores packages under lowercase org names. Docker's buildx
           # silently lowercases on push, but Trivy's reference parser is
           # stricter and rejects 'Heretek-AI' as malformed.
-          image-ref: ${{ env.REGISTRY }}/${{ lower(env.IMAGE_NAME) }}:latest
+          image-ref: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:latest
           format: table
           exit-code: '0'
           ignore-unfixed: true
