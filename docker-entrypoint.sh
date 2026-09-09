@@ -38,6 +38,44 @@ mkdir -p "$AGENT_DIR"
 chmod 0755 "$AGENT_DIR" || true
 chown -R 1001:1001 "$AGENT_DIR" || true
 
+# Seed custom OpenAI-compatible provider config from OMP_PROVIDER_* env
+# vars, if all required fields are set. Idempotent: never clobbers an
+# existing models.yml or config.yml (manual edits survive restarts).
+# Use ${VAR:-} defaults throughout so set -u doesn't abort on the unset
+# case (the [ -n ] checks below still short-circuit correctly).
+if [ -n "${OMP_PROVIDER_LABEL:-}" ] && [ -n "${OMP_PROVIDER_BASE_URL:-}" ] \
+   && [ -n "${OMP_PROVIDER_API_KEY:-}" ] && [ -n "${OMP_PROVIDER_MODEL_ID:-}" ]; then
+    MODELS_FILE="$AGENT_DIR/models.yml"
+    CONFIG_FILE="$AGENT_DIR/config.yml"
+    DISPLAY_NAME="${OMP_PROVIDER_MODEL_NAME:-${OMP_PROVIDER_MODEL_ID}}"
+    DEFAULT_MODEL="${OMP_DEFAULT_MODEL:-${OMP_PROVIDER_LABEL}/${OMP_PROVIDER_MODEL_ID}}"
+    API_TYPE="${OMP_PROVIDER_API:-openai-completions}"
+
+    if [ ! -f "$MODELS_FILE" ]; then
+        cat > "$MODELS_FILE" <<EOF
+providers:
+  ${OMP_PROVIDER_LABEL}:
+    baseUrl: ${OMP_PROVIDER_BASE_URL}
+    api: ${API_TYPE}
+    apiKey: ${OMP_PROVIDER_API_KEY}
+    models:
+      - id: ${OMP_PROVIDER_MODEL_ID}
+        name: ${DISPLAY_NAME}
+EOF
+        chown 1001:1001 "$MODELS_FILE" || true
+        echo "Seeded $MODELS_FILE for custom provider '${OMP_PROVIDER_LABEL}'"
+    fi
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat > "$CONFIG_FILE" <<EOF
+modelRoles:
+  default: ${DEFAULT_MODEL}
+EOF
+        chown 1001:1001 "$CONFIG_FILE" || true
+        echo "Seeded $CONFIG_FILE with default model '${DEFAULT_MODEL}'"
+    fi
+fi
+
 echo "Starting ompweb on ${HOST}:${PORT} (agent dir: ${AGENT_DIR})"
 
 # Drop privileges and exec the launcher. `exec` is critical so signals

@@ -78,6 +78,66 @@ The container stores two kinds of state:
 
 By default only `ompweb_data` is mounted. To let `omp` actually edit your code, uncomment the workspace line in `docker-compose.yml` and set `WORKSPACE_DIR` in `.env` to the directory you want to work on. In the ompweb UI, set the project cwd to `/workspace/<your-project>`.
 
+---
+
+## Using a custom OpenAI-compatible endpoint
+
+Point omp at any OpenAI-compatible service (OpenRouter, LM Studio, Together AI, Ollama with the OpenAI-compat shim, vLLM, etc.) by adding a few lines to `.env`. On the next container start, the entrypoint writes `~/.omp/agent/models.yml` and `config.yml` for you — no YAML knowledge required.
+
+| Var | Example |
+|---|---|
+| `OMP_PROVIDER_LABEL` | `openrouter` |
+| `OMP_PROVIDER_BASE_URL` | `https://openrouter.ai/api/v1` |
+| `OMP_PROVIDER_API_KEY` | `sk-or-v1-...` |
+| `OMP_PROVIDER_API` | `openai-completions` (or `openai-responses`) |
+| `OMP_PROVIDER_MODEL_ID` | `anthropic/claude-3.5-sonnet` |
+| `OMP_PROVIDER_MODEL_NAME` | `Claude 3.5 Sonnet` (optional, defaults to MODEL_ID) |
+| `OMP_DEFAULT_MODEL` | `openrouter/anthropic/claude-3.5-sonnet` (optional; for IDs that themselves contain `/`) |
+
+Leave all six blank to use the built-in providers (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.).
+
+**OpenRouter:**
+
+```sh
+OMP_PROVIDER_LABEL=openrouter
+OMP_PROVIDER_BASE_URL=https://openrouter.ai/api/v1
+OMP_PROVIDER_API_KEY=sk-or-v1-...
+OMP_PROVIDER_API=openai-completions
+OMP_PROVIDER_MODEL_ID=anthropic/claude-3.5-sonnet
+OMP_PROVIDER_MODEL_NAME=Claude 3.5 Sonnet
+# OpenRouter model IDs contain '/'; set this explicitly to avoid ambiguity.
+OMP_DEFAULT_MODEL=openrouter/anthropic/claude-3.5-sonnet
+```
+
+**LM Studio (local):**
+
+```sh
+OMP_PROVIDER_LABEL=lmstudio
+OMP_PROVIDER_BASE_URL=http://host.docker.internal:1234/v1
+OMP_PROVIDER_API_KEY=lm-studio
+OMP_PROVIDER_API=openai-completions
+OMP_PROVIDER_MODEL_ID=qwen2.5-coder-7b
+```
+
+**Ollama (local):**
+
+```sh
+OMP_PROVIDER_LABEL=ollama
+OMP_PROVIDER_BASE_URL=http://host.docker.internal:11434/v1
+OMP_PROVIDER_API_KEY=ollama
+OMP_PROVIDER_API=openai-completions
+OMP_PROVIDER_MODEL_ID=qwen2.5-coder:7b
+```
+
+If you've already written `~/.omp/agent/models.yml` by hand (e.g. via `docker exec ompweb sh` and a text editor), the entrypoint won't touch it — your edits survive restarts. To regenerate from env vars, delete the files first:
+
+```sh
+docker exec ompweb rm /data/omp/models.yml /data/omp/config.yml
+docker compose restart
+```
+
+---
+
 ### Backups
 
 ```sh

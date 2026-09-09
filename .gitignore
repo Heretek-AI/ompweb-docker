@@ -1,0 +1,16 @@
+# Local secrets & config — never commit these.
+.env
+.env.*
+
+# Keep the example (it has no secrets).
+!.env.example
+
+# Local build state.
+node_modules/
+.next/
+*.log
+
+# Editor/OS junk.
+.DS_Store
+.vscode/
+.idea/
