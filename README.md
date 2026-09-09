@@ -41,7 +41,7 @@ docker compose up -d
 # 4. Open http://localhost:30177
 ```
 
-The first run pulls the image from `ghcr.io/<owner>/ompweb:latest`. Use `docker compose logs -f ompweb` to watch Next.js boot.
+The first run pulls the image from `ghcr.io/<owner>/ompweb-docker:latest`. Use `docker compose logs -f ompweb` to watch Next.js boot.
 
 ---
 
@@ -60,9 +60,9 @@ Pin to a specific tag for reproducibility:
 
 ```yaml
 # docker-compose.yml
-image: ghcr.io/<owner>/ompweb:18.1.15    # OMP_VERSION=18.1.15 build
+image: ghcr.io/<owner>/ompweb-docker:18.1.15    # OMP_VERSION=18.1.15 build
 # or for a specific ompweb npm version:
-image: ghcr.io/<owner>/ompweb:0.4.2       # OMPWEB_VERSION=0.4.2 build
+image: ghcr.io/<owner>/ompweb-docker:0.4.2       # OMPWEB_VERSION=0.4.2 build
 ```
 
 ---
@@ -167,7 +167,7 @@ docker compose up -d   # if your compose points at this local tag
 
 ```
 ┌──────────────────────────────────────────────────┐
-│ Container (ghcr.io/<owner>/ompweb)               │
+│ Container (ghcr.io/<owner>/ompweb-docker)       │
 │                                                  │
 │  ENTRYPOINT: tini → docker-entrypoint.sh         │
 │      └─ validates OMP_WEB_PASSWORD (if LAN bind) │
