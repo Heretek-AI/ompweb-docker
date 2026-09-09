@@ -22,7 +22,7 @@ services:
       - ALL
     # Don't set `user:` here — the entrypoint script runs as root to
     # initialize /data/omp on first start (named volumes are root-owned
-    # by default) and then drops to UID 1001 via su-exec. The Docker
+    # by default) and then drops to UID 1001 via gosu. The Docker
     # runtime still enforces no-new-privileges so the drop is safe.
 
     ports:

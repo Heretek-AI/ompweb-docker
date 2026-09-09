@@ -29,10 +29,10 @@ chown -R 1001:1001 "$AGENT_DIR"
 echo "Starting ompweb on ${HOST}:${PORT} (agent dir: ${AGENT_DIR})"
 
 # Drop privileges and exec the launcher. `exec` is critical so signals
-# reach Node, not this shell. su-exec is a minimal setuid wrapper (no
-# PAM, no env-stripping) — lighter than gosu.
+# reach Node, not this shell. gosu is the standard Debian equivalent of
+# su-exec (no PAM, no env-stripping).
 # shellcheck disable=SC2086
-exec su-exec 1001:1001 node ./node_modules/@kahme247/ompweb/bin/omp-web.js \
+exec gosu 1001:1001 node ./node_modules/@kahme247/ompweb/bin/omp-web.js \
     --hostname "$HOST" \
     --port "$PORT" \
     --no-open \
