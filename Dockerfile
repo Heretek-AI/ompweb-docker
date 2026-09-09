@@ -5,9 +5,10 @@
 # Stage 1 (ompweb-install): `npm install @kahme247/ompweb` — its published tarball
 #                           ships .next/ pre-built (see the package's `prepack` script),
 #                           so we skip next build entirely.
-# Stage 2 (runtime):        node:26-slim + Bun + tini + gosu + the omp binary
+# Stage 2 (runtime):        node:26-slim + Bun + tini + the omp binary
 #                           installed via `bun install -g @oh-my-pi/pi-coding-agent`.
 #                           Bun is required because the omp wrapper is Bun-compiled.
+#                           The whole container runs as UID 1001 (no root, no gosu).
 #
 # Build args:
 #   OMPWEB_VERSION  @kahme247/ompweb version. Default: latest.
@@ -35,10 +36,11 @@ RUN --mount=type=cache,target=/root/.npm \
 FROM node:${NODE_VERSION} AS runtime
 
 # tini for proper signal forwarding as PID 1; wget for the healthcheck;
-# gosu for privilege drop in the entrypoint script; curl + unzip for Bun install.
+# curl + unzip for Bun install. No gosu: the container runs entirely as
+# UID 1001 (never root), so no privilege-drop tool is needed.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        tini wget ca-certificates gosu curl unzip \
+        tini wget ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 1001 -r app \
     && useradd -u 1001 -r -g app -d /app -s /sbin/nologin app
@@ -95,10 +97,19 @@ ENV NODE_ENV=production \
     OMP_WEB_NO_OPEN=1 \
     OMP_PINNED_VERSION=${OMP_VERSION}
 
-# NOTE: No `USER app` here. The entrypoint script runs as root (PID 1
-# = tini, default root user) so it can mkdir /data/omp and chown it
-# before dropping privileges via gosu. The compose file uses
-# cap_drop: [ALL] + no-new-privileges to keep that root window safe.
+# Pre-create the persistent data dir owned by UID 1001. When a fresh
+# named volume is first mounted at /data, Docker copies this directory
+# (including ownership) into the volume — so UID 1001 owns /data/omp
+# from the very first run, with no root chown needed. (An existing
+# volume created by an older root-running image must be recreated once:
+# `docker volume rm ompweb_data`.)
+RUN mkdir -p /data/omp && chown -R 1001:1001 /data
+
+# The entire runtime runs as UID 1001: tini (PID 1), the entrypoint,
+# node, and spawned omp subprocesses. No root, no gosu, no capability
+# requirements — which is what makes this portable across hosts where
+# cap_drop/chown/seclabel behaved differently.
+USER 1001:1001
 EXPOSE 30177
 
 # wget --spider succeeds on any HTTP response (200/404/etc.) so it's a robust

@@ -14,17 +14,17 @@ services:
 
     # tini is baked into the image's ENTRYPOINT, so we don't need Compose's init.
 
-    # The entrypoint runs as root to initialize /data/omp (named volumes
-    # mount root-owned on first use), then drops to UID 1001 via gosu
-    # before exec'ing the ompweb launcher. We use Docker's DEFAULT
-    # capability set (which includes CHOWN, SETUID, SETGID, FOWNER,
-    # DAC_OVERRIDE) rather than cap_drop: ALL — dropping ALL and
-    # re-adding granular caps proved unreliable across hosts (gosu's
-    # setuid and volume chown both failed on btrfs/seclabel filesystems
-    # even with the caps listed). no-new-privileges still blocks
-    # setuid-binary privilege escalation.
+    # Run entirely as UID 1001 (never root). The image ships /data/omp
+    # owned by UID 1001, and Docker copies it into the fresh named
+    # volume on first mount — so the app user owns its data dir with no
+    # root setup at runtime. That makes cap_drop: ALL safe (nothing in
+    # the container needs a capability) and portable across hosts
+    # (btrfs/seclabel/userns quirks can't break it).
+    user: "1001:1001"
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
 
     ports:
       - "30177:30177"
