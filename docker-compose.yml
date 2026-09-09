@@ -20,6 +20,20 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # CAP_CHOWN is needed by the entrypoint script to chown the named
+      # volume's /data directory to the app user (UID 1001) on first
+      # start. Without it, the script gets EACCES on chown. The
+      # capability only allows ownership changes, not broader privilege
+      # escalation, so it's safe to keep.
+#
+      # CAP_SETUID + CAP_SETGID are needed by gosu to switch from root
+      # to the app user via setresuid/setresgid. Same justification —
+      # only affects user switching within the container, not external
+      # privilege.
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
     # Don't set `user:` here — the entrypoint script runs as root to
     # initialize /data/omp on first start (named volumes are root-owned
     # by default) and then drops to UID 1001 via gosu. The Docker
