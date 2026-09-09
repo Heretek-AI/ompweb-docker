@@ -133,12 +133,22 @@ jobs:
             org.opencontainers.image.licenses=MIT
 
       # Compose the final tag/label list from whichever metadata step ran.
+      # Use bash ${VAR:-fallback} so an empty string falls through cleanly.
       - name: Collect metadata outputs
         id: meta
+        env:
+          BRANCH_TAGS: ${{ steps.meta-branch.outputs.tags }}
+          BRANCH_LABELS: ${{ steps.meta-branch.outputs.labels }}
+          TAG_TAGS: ${{ steps.meta-tag.outputs.tags }}
+          TAG_LABELS: ${{ steps.meta-tag.outputs.labels }}
+          PR_TAGS: ${{ steps.meta-pr.outputs.tags }}
+          PR_LABELS: ${{ steps.meta-pr.outputs.labels }}
+          MANUAL_TAGS: ${{ steps.meta-manual.outputs.tags }}
+          MANUAL_LABELS: ${{ steps.meta-manual.outputs.labels }}
         run: |
           {
-            echo "tags=${{ steps.meta-branch.outputs.tags || steps.meta-tag.outputs.tags || steps.meta-pr.outputs.tags || steps.meta-manual.outputs.tags }}"
-            echo "labels=${{ steps.meta-branch.outputs.labels || steps.meta-tag.outputs.labels || steps.meta-pr.outputs.labels || steps.meta-manual.outputs.labels }}"
+            echo "tags=${BRANCH_TAGS:-${TAG_TAGS:-${PR_TAGS:-${MANUAL_TAGS:-}}}}"
+            echo "labels=${BRANCH_LABELS:-${TAG_LABELS:-${PR_LABELS:-${MANUAL_LABELS:-}}}}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
