@@ -12,10 +12,11 @@
 #
 # Build args:
 #   OMPWEB_VERSION  @kahme247/ompweb version. Default: latest.
-#   OMP_VERSION     can1357/oh-my-pi release tag. Default: latest (resolved at build time).
+#   OMP_VERSION     can1357/oh-my-pi release tag. Default: 18.1.15 (override with --build-arg OMP_VERSION=18.1.16).
 #   NODE_VERSION    Node.js runtime. Default: 26-slim (rolling latest 26.x).
 
 ARG NODE_VERSION=26-slim
+ARG OMP_VERSION=18.1.15
 
 # ---- Stage 1: install ompweb from npm ----
 FROM node:${NODE_VERSION} AS ompweb-install
@@ -32,7 +33,7 @@ RUN --mount=type=cache,target=/root/.npm \
 
 # ---- Stage 2: download the omp binary ----
 FROM alpine:3.20 AS omp-bin
-ARG OMP_VERSION=latest
+ARG OMP_VERSION
 
 RUN apk add --no-cache curl ca-certificates
 
@@ -67,6 +68,16 @@ RUN apt-get update \
     && groupadd -g 1001 -r app \
     && useradd -u 1001 -r -g app -d /app -s /sbin/nologin app
 
+# Install omp's native addon (bundles pi_natives.linux-x64-{baseline,modern}.node).
+# omp is a Bun-compiled binary that bundles its own JS runtime, but it needs
+# these native addons present on disk at a discoverable path. The entrypoint
+# script copies them into /app/.omp/natives/<version>/ and chowns to the
+# app user before dropping privileges.
+ARG OMP_VERSION
+RUN --mount=type=cache,target=/root/.npm \
+    npm install --no-audit --no-fund --global \
+        @oh-my-pi/pi-natives-linux-x64@${OMP_VERSION}
+
 WORKDIR /app
 
 # ompweb install (node_modules/ includes the prebuilt .next/ and bin/).
@@ -86,7 +97,8 @@ ENV NODE_ENV=production \
     OMP_WEB_HOSTNAME=0.0.0.0 \
     PI_CODING_AGENT_DIR=/data/omp \
     OMP_WEB_OMP_BIN=/usr/local/bin/omp \
-    OMP_WEB_NO_OPEN=1
+    OMP_WEB_NO_OPEN=1 \
+    OMP_PINNED_VERSION=${OMP_VERSION}
 
 # NOTE: No `USER app` here. The entrypoint script runs as root (PID 1
 # = tini, default root user) so it can mkdir /data/omp and chown it
