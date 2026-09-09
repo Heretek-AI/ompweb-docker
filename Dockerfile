@@ -4,23 +4,26 @@
 #
 # Stage 1 (ompweb-deps): clone upstream ompweb and install full deps (incl. devDeps).
 # Stage 2 (ompweb-build): run `next build` and prune devDeps so the runtime layer is small.
-# Stage 3 (omp-bin):     download the static musl omp binary for linux/amd64.
-# Stage 4 (runtime):     minimal node:22.19.0-alpine + tini + non-root app user.
+# Stage 3 (omp-bin):     download the static glibc omp binary for linux/amd64.
+# Stage 4 (runtime):     minimal node:26-slim + tini + non-root app user.
 #
 # Build args:
-#   OMPWEB_REF  Git ref (branch/tag/sha) of kahme247/ompweb to pin. Default: main.
-#   OMP_VERSION Release tag of can1357/oh-my-pi to bundle. Default: latest (resolved at build time).
-#   NODE_VERSION  Node.js runtime version (must match ompweb's .nvmrc pin). Default: 22.19.0.
+#   OMPWEB_REF   Git ref (branch/tag/sha) of kahme247/ompweb to pin. Default: main.
+#   OMP_VERSION  Release tag of can1357/oh-my-pi to bundle. Default: latest (resolved at build time).
+#   NODE_VERSION Node.js runtime version. Default: 26-slim (rolling latest 26.x).
 
-ARG NODE_VERSION=22.19.0
+ARG NODE_VERSION=26-slim
 
 # ---- Stage 1: install ompweb deps ----
-FROM node:${NODE_VERSION}-alpine AS ompweb-deps
+FROM node:${NODE_VERSION} AS ompweb-deps
 ARG OMPWEB_REF=main
 WORKDIR /src
 
 # git is needed to clone ompweb. ca-certificates for TLS to GitHub.
-RUN apk add --no-cache git ca-certificates
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # Shallow clone to keep the layer small.
 RUN git clone --depth 1 --branch "${OMPWEB_REF}" --no-tags \
@@ -32,7 +35,7 @@ RUN --mount=type=cache,target=/root/.npm \
     npm ci --no-audit --no-fund
 
 # ---- Stage 2: build ompweb ----
-FROM node:${NODE_VERSION}-alpine AS ompweb-build
+FROM node:${NODE_VERSION} AS ompweb-build
 ARG OMPWEB_REF=main
 WORKDIR /src
 
@@ -55,10 +58,9 @@ ARG OMP_VERSION=latest
 RUN apk add --no-cache curl ca-certificates
 
 # Resolve "latest" to the current release tag (strip the leading 'v' that GitHub uses),
-# then download the musl-compiled linux/amd64 binary. We verify it by magic-byte check
-# (not by execution) — executing it here would require the musl dynamic loader at a
-# specific path, which Alpine 3.20 happens to provide but isn't guaranteed across base
-# image updates. The runtime stage is where we actually test it.
+# then download the glibc-compiled linux/amd64 binary. We verify by magic-byte check
+# (not execution) — this stage never runs the binary, so the host libc doesn't matter.
+# The runtime stage (Debian-based) is where omp actually executes.
 RUN set -eux; \
     if [ "$OMP_VERSION" = "latest" ]; then \
         OMP_VERSION=$(curl -fsSL https://api.github.com/repos/can1357/oh-my-pi/releases/latest \
@@ -66,7 +68,7 @@ RUN set -eux; \
     fi; \
     echo "Resolved OMP_VERSION=${OMP_VERSION}"; \
     curl -fsSL -o /usr/local/bin/omp \
-        "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/omp-linux-musl-x64"; \
+        "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/omp-linux-x64"; \
     chmod +x /usr/local/bin/omp; \
     # Validate the file is a 64-bit ELF executable — catches 404 HTML pages, empty
     # responses, and partial downloads in one shot.
@@ -75,12 +77,15 @@ RUN set -eux; \
     echo "omp binary ready: ${SIZE} bytes"
 
 # ---- Stage 4: runtime ----
-FROM node:${NODE_VERSION}-alpine AS runtime
+FROM node:${NODE_VERSION} AS runtime
 
 # tini for proper signal forwarding as PID 1; wget for the healthcheck.
-RUN apk add --no-cache tini wget ca-certificates \
-    && addgroup -g 1001 -S app \
-    && adduser -S app -u 1001 -G app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        tini wget ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -g 1001 -r app \
+    && useradd -u 1001 -r -g app -d /app -s /sbin/nologin app
 
 WORKDIR /app
 

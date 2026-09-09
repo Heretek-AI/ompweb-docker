@@ -172,9 +172,9 @@ docker compose up -d   # if your compose points at this local tag
 │              └─ spawns `omp --mode rpc-ui`       │
 │                 (NDJSON over stdio, per session) │
 │                                                  │
-│  /              rootfs (node:22.19.0-alpine)     │
+│  /              rootfs (node:26-slim, Debian)    │
 │  /app           ompweb Next.js app               │
-│  /usr/local/bin/omp  static omp binary           │
+│  /usr/local/bin/omp  static omp binary (glibc)   │
 │  /data          persistent volume                │
 │      └─ omp/   → ~/.omp/agent  (config, etc.)    │
 │  /workspace     bind-mounted from host           │
@@ -185,9 +185,14 @@ docker compose up -d   # if your compose points at this local tag
 
 `ompweb` does not embed `omp`. It locates the `omp` binary via `OMP_WEB_OMP_BIN` (or `$PATH`) and spawns it with `--mode rpc-ui`, exchanging **NDJSON frames over stdio**. There is no HTTP server in `omp`. So the two must run together, and the simplest deployment is one container.
 
-### Why Alpine?
+### Why Debian slim?
 
-`oh-my-pi` ships a static `omp-linux-musl-x64` binary. Drop it into Alpine and it just works — no glibc version dance, no Bun runtime needed at runtime. Combined with `node:22.19.0-alpine` the final image is small and well-supported.
+We use `node:26-slim` (Debian Bookworm, glibc) rather than Alpine for two reasons:
+
+1. **Current Node** — `node:26-slim` tracks the latest 26.x release, which is what users coming to this project expect in 2026.
+2. **glibc-compatible omp binary** — `oh-my-pi` ships a glibc `omp-linux-x64` binary that runs cleanly on Debian with no extra runtime needed (no Bun, no musl loader).
+
+The size penalty vs Alpine (~80MB base vs ~50MB) is small compared to the bundled Next.js build and omp binary (~150MB). To pin a specific Node patch, build with `--build-arg NODE_VERSION=26.8.1-slim`.
 
 ### Why not `output: 'standalone'` for Next.js?
 
