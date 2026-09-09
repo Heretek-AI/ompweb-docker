@@ -4,7 +4,7 @@
 # Runs as root (PID 1 = tini, which execs this script). It performs
 # setup work that requires root — primarily creating the persistent
 # agent directory in the named volume, which Docker creates as
-# root-owned — then drops privileges via su-exec and execs the actual
+# root-owned — then drops privileges via gosu and execs the actual
 # ompweb launcher as the non-root app user (UID 1001).
 
 set -eu

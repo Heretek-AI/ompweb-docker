@@ -7,43 +7,24 @@
 
 services:
   ompweb:
-    # Override GHCR_OWNER in .env if you forked this repo. The default assumes
-    # the canonical org is kahme247; change to your own namespace if you forked.
-    image: ompweb:local
+    # Pull from GHCR. Override GHCR_OWNER in .env if you forked this repo.
+    image: ghcr.io/${GHCR_OWNER:-heretek-ai}/ompweb-docker:${TAG:-latest}
     container_name: ompweb
     restart: unless-stopped
 
     # tini is baked into the image's ENTRYPOINT, so we don't need Compose's init.
 
-    # Lock down the container.
+    # The entrypoint runs as root to initialize /data/omp (named volumes
+    # mount root-owned on first use), then drops to UID 1001 via gosu
+    # before exec'ing the ompweb launcher. We use Docker's DEFAULT
+    # capability set (which includes CHOWN, SETUID, SETGID, FOWNER,
+    # DAC_OVERRIDE) rather than cap_drop: ALL — dropping ALL and
+    # re-adding granular caps proved unreliable across hosts (gosu's
+    # setuid and volume chown both failed on btrfs/seclabel filesystems
+    # even with the caps listed). no-new-privileges still blocks
+    # setuid-binary privilege escalation.
     security_opt:
       - no-new-privileges:true
-    cap_drop:
-      - ALL
-    # CAP_CHOWN is needed by the entrypoint script to chown the named
-      # volume's /data directory to the app user (UID 1001) on first
-      # start. Without it, the script gets EACCES on chown. The
-      # capability only allows ownership changes, not broader privilege
-      # escalation, so it's safe to keep.
-#
-      # CAP_SETUID + CAP_SETGID are needed by gosu to switch from root
-      # to the app user via setresuid/setresgid. Same justification —
-      # only affects user switching within the container, not external
-      # privilege.
-#
-      # CAP_DAC_OVERRIDE lets root bypass file-mode checks when the
-      # entrypoint chowns the persistent volume on subsequent starts
-      # (omp creates internal dirs at mode 0700, which would otherwise
-      # lock out the re-chown). Tightest justifiable addition.
-    cap_add:
-      - CHOWN
-      - SETUID
-      - SETGID
-      - DAC_OVERRIDE
-    # Don't set `user:` here — the entrypoint script runs as root to
-    # initialize /data/omp on first start (named volumes are root-owned
-    # by default) and then drops to UID 1001 via gosu. The Docker
-    # runtime still enforces no-new-privileges so the drop is safe.
 
     ports:
       - "30177:30177"
