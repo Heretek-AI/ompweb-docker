@@ -2,8 +2,8 @@
 #
 # Triggers:
 #   - push to main                      -> tags: main, main-<sha>, latest
-#   - tag matching v*.*.*               -> tags: vX.Y.Z, X.Y.Z, X.Y, X, latest (if most recent)
-#   - pull_request                      -> build only (no push), tag: pr-<num>
+#   - tag matching v*.*.*               -> tags: X.Y.Z, X.Y, X, sha
+#   - pull_request                      -> build only (no push), tag: pr-<num>-<sha>
 #   - workflow_dispatch                 -> manual trigger using current branch
 
 name: docker
@@ -66,28 +66,80 @@ jobs:
             echo "ref=${REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Extract Docker metadata
-        id: meta
+      # ---- Metadata: branch push to main → main, main-<sha>, latest ----
+      - name: Extract Docker metadata (branch)
+        id: meta-branch
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # Semver for tagged releases
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            # Immutable per-commit ref
+            type=raw,value=main
+            type=raw,value=latest
             type=sha,format=long
-            # Branch / latest / PR tags
-            type=raw,value=main,enable={{is_default_branch}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=pr-{{head_ref}},enable={{is_pull_request}}
-            type=raw,value=${{ github.ref_name }},enable=${{ github.ref_type == 'tag' }}
           labels: |
             org.opencontainers.image.title=ompweb
             org.opencontainers.image.description=Containerized oh-my-pi (omp) + ompweb web UI
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.licenses=MIT
+
+      # ---- Metadata: tag push (v*.*.*) → semver + sha ----
+      - name: Extract Docker metadata (tag)
+        id: meta-tag
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,format=long
+          labels: |
+            org.opencontainers.image.title=ompweb
+            org.opencontainers.image.description=Containerized oh-my-pi (omp) + ompweb web UI
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT
+
+      # ---- Metadata: pull request → pr-<num>-<sha> (build only, no push) ----
+      - name: Extract Docker metadata (pr)
+        id: meta-pr
+        if: github.event_name == 'pull_request'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=pr-${{ github.event.pull_request.number }}-{{sha}}
+          labels: |
+            org.opencontainers.image.title=ompweb
+            org.opencontainers.image.description=Containerized oh-my-pi (omp) + ompweb web UI
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT
+
+      # ---- Metadata: workflow_dispatch → main-<sha> ----
+      - name: Extract Docker metadata (manual)
+        id: meta-manual
+        if: github.event_name == 'workflow_dispatch'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=manual
+            type=sha,format=long
+          labels: |
+            org.opencontainers.image.title=ompweb
+            org.opencontainers.image.description=Containerized oh-my-pi (omp) + ompweb web UI
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT
+
+      # Compose the final tag/label list from whichever metadata step ran.
+      - name: Collect metadata outputs
+        id: meta
+        run: |
+          {
+            echo "tags=${{ steps.meta-branch.outputs.tags || steps.meta-tag.outputs.tags || steps.meta-pr.outputs.tags || steps.meta-manual.outputs.tags }}"
+            echo "labels=${{ steps.meta-branch.outputs.labels || steps.meta-tag.outputs.labels || steps.meta-pr.outputs.labels || steps.meta-manual.outputs.labels }}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
