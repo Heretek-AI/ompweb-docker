@@ -165,7 +165,10 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          # GHCR stores packages under lowercase org names. Docker's buildx
+          # silently lowercases on push, but Trivy's reference parser is
+          # stricter and rejects 'Heretek-AI' as malformed.
+          image-ref: ${{ env.REGISTRY }}/${{ lower(env.IMAGE_NAME) }}:latest
           format: table
           exit-code: '0'
           ignore-unfixed: true
