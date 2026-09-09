@@ -50,22 +50,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Pin the ompweb ref to whatever the workflow is running against.
-      # For PRs this is the PR head ref; for pushes/tags this is the branch/tag.
-      # Route head_ref through an env var to avoid script-injection warnings.
-      - name: Resolve ompweb ref
-        id: ompweb-ref
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_REF: ${{ github.head_ref }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          if [ "${EVENT_NAME}" = "pull_request" ]; then
-            echo "ref=${HEAD_REF}" >> "$GITHUB_OUTPUT"
-          else
-            echo "ref=${REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
-
       # ---- Metadata: branch push to main → main, main-<sha>, latest ----
       - name: Extract Docker metadata (branch)
         id: meta-branch
@@ -168,7 +152,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            OMPWEB_REF=${{ steps.ompweb-ref.outputs.ref }}
+            OMPWEB_VERSION=latest
             OMP_VERSION=latest
           # Free GHA-backed cache; reduces build time on repeat runs.
           cache-from: type=gha

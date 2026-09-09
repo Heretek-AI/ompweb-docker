@@ -24,7 +24,7 @@ mkdir -p "$AGENT_DIR"
 echo "Starting ompweb on ${HOST}:${PORT} (agent dir: ${AGENT_DIR})"
 
 # shellcheck disable=SC2086
-exec node ./bin/omp-web.js \
+exec node ./node_modules/@kahme247/ompweb/bin/omp-web.js \
     --hostname "$HOST" \
     --port "$PORT" \
     --no-open \

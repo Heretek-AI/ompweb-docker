@@ -8,12 +8,15 @@ Use this instead of running `omp` on bare metal. State lives in a Docker volume;
 
 ## Why a wrapper repo?
 
-The upstream `ompweb` repo has **no Docker artifacts at all** — it's distributed only via `npm install -g @kahme247/ompweb`. This wrapper repo contains just the Docker infrastructure (Dockerfile, compose, workflow, docs) and pulls both upstream projects at image build time.
+The upstream `ompweb` repo has **no Docker artifacts at all** — it's distributed only via npm. This wrapper repo contains just the Docker infrastructure (Dockerfile, compose, workflow, docs). At image build time we:
 
-| Component | Upstream | License |
+1. `npm install @kahme247/ompweb@<version>` — the published tarball ships a **pre-built** `.next/` bundle (the package's `prepack` script runs `next build` before publishing), so no build step is needed in Docker.
+2. Download the static `omp-linux-x64` binary from `can1357/oh-my-pi/releases` (the `@oh-my-pi/pi-coding-agent` npm package is Bun-only source code and not installable in plain Node).
+
+| Component | Upstream | Source |
 |---|---|---|
-| Web UI | <https://github.com/kahme247/ompweb> | MIT |
-| Agent CLI | <https://github.com/can1357/oh-my-pi> | (see repo) |
+| Web UI | <https://github.com/kahme247/ompweb> | npm `@kahme247/ompweb` |
+| Agent CLI | <https://github.com/can1357/oh-my-pi> | GitHub Releases `omp-linux-x64` |
 | This wrapper | — | MIT |
 
 ---
@@ -57,7 +60,9 @@ Pin to a specific tag for reproducibility:
 
 ```yaml
 # docker-compose.yml
-image: ghcr.io/<owner>/ompweb:v18.1.15-ompweb-main
+image: ghcr.io/<owner>/ompweb:18.1.15    # OMP_VERSION=18.1.15 build
+# or for a specific ompweb npm version:
+image: ghcr.io/<owner>/ompweb:0.4.2       # OMPWEB_VERSION=0.4.2 build
 ```
 
 ---
@@ -152,7 +157,7 @@ The CI rebuilds on every push to `main` and pushes `latest`. Tagged releases (`v
 To force a rebuild with a pinned version of `omp` (instead of `latest`):
 
 ```sh
-docker build --build-arg OMP_VERSION=18.1.15 --build-arg OMPWEB_REF=main -t ompweb:custom .
+docker build --build-arg OMP_VERSION=18.1.15 --build-arg OMPWEB_VERSION=0.4.2 -t ompweb:custom .
 docker compose up -d   # if your compose points at this local tag
 ```
 
@@ -167,13 +172,13 @@ docker compose up -d   # if your compose points at this local tag
 │  ENTRYPOINT: tini → docker-entrypoint.sh         │
 │      └─ validates OMP_WEB_PASSWORD (if LAN bind) │
 │      └─ mkdir -p $PI_CODING_AGENT_DIR            │
-│      └─ exec node bin/omp-web.js                 │
+│      └─ exec node node_modules/@kahme247/ompweb/bin/omp-web.js │
 │              ├─ listens on 0.0.0.0:30177         │
 │              └─ spawns `omp --mode rpc-ui`       │
 │                 (NDJSON over stdio, per session) │
 │                                                  │
 │  /              rootfs (node:26-slim, Debian)    │
-│  /app           ompweb Next.js app               │
+│  /app/node_modules  npm install of @kahme247/ompweb│
 │  /usr/local/bin/omp  static omp binary (glibc)   │
 │  /data          persistent volume                │
 │      └─ omp/   → ~/.omp/agent  (config, etc.)    │
@@ -196,7 +201,7 @@ The size penalty vs Alpine (~80MB base vs ~50MB) is small compared to the bundle
 
 ### Why not `output: 'standalone'` for Next.js?
 
-ompweb doesn't enable `output: 'standalone'` upstream. Adding it would require either forking or carrying a tiny patch. `npm prune --omit=dev` in the build stage already strips devDependencies, which is the biggest size win without forking. A future optimization (~120MB instead of ~250MB) is documented as a follow-up.
+We don't build Next.js at all in this image — we install the pre-built tarball from npm. So `output: 'standalone'` is moot here. If upstream ompweb ever switches to standalone, this image would automatically benefit.
 
 ---
 
@@ -231,10 +236,10 @@ The Docker build stage calls `api.github.com` for the latest `omp` release. If G
 ### I want a different version of ompweb
 
 ```sh
-docker build --build-arg OMPWEB_REF=v0.4.2 -t ompweb:custom .
+docker build --build-arg OMPWEB_VERSION=0.4.2 -t ompweb:custom .
 ```
 
-Where `v0.4.2` is any tag/branch from <https://github.com/kahme247/ompweb/tags>.
+Where `0.4.2` is any published version on <https://www.npmjs.com/package/@kahme247/ompweb?activeTab=versions>.
 
 ---
 
@@ -243,8 +248,9 @@ Where `v0.4.2` is any tag/branch from <https://github.com/kahme247/ompweb/tags>.
 ### Build locally
 
 ```sh
-docker build --build-arg OMPWEB_REF=main -t ompweb:dev .
+docker build --build-arg OMPWEB_VERSION=latest -t ompweb:dev .
 docker run --rm ompweb:dev omp --version    # sanity check
+docker run --rm ompweb:dev ls node_modules/@kahme247/ompweb/.next  # confirm prebuilt .next exists
 ```
 
 ### Run with a local compose override
