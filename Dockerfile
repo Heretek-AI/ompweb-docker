@@ -88,7 +88,10 @@ ENV NODE_ENV=production \
     OMP_WEB_OMP_BIN=/usr/local/bin/omp \
     OMP_WEB_NO_OPEN=1
 
-USER app
+# NOTE: No `USER app` here. The entrypoint script runs as root (PID 1
+# = tini, default root user) so it can mkdir /data/omp and chown it
+# before dropping privileges via gosu. The compose file uses
+# cap_drop: [ALL] + no-new-privileges to keep that root window safe.
 EXPOSE 30177
 
 # wget --spider succeeds on any HTTP response (200/404/etc.) so it's a robust
