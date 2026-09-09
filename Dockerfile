@@ -5,15 +5,15 @@
 # Stage 1 (ompweb-install): `npm install @kahme247/ompweb` — its published tarball
 #                           ships .next/ pre-built (see the package's `prepack` script),
 #                           so we skip next build entirely.
-# Stage 2 (omp-bin):        Download the static glibc `omp` binary for linux/amd64
-#                           from GitHub releases. The @oh-my-pi/pi-coding-agent npm
-#                           package is Bun-required source code, not a CLI tarball.
-# Stage 3 (runtime):        Minimal node:26-slim + tini + non-root app user.
+# Stage 2 (runtime):        node:26-slim + Bun + tini + gosu + the omp binary
+#                           installed via `bun install -g @oh-my-pi/pi-coding-agent`.
+#                           Bun is required because the omp wrapper is Bun-compiled.
 #
 # Build args:
 #   OMPWEB_VERSION  @kahme247/ompweb version. Default: latest.
-#   OMP_VERSION     can1357/oh-my-pi release tag. Default: 18.1.15 (override with --build-arg OMP_VERSION=18.1.16).
-#   NODE_VERSION    Node.js runtime. Default: 26-slim (rolling latest 26.x).
+#   OMP_VERSION     @oh-my-pi/pi-coding-agent version. Default: 18.1.15.
+#   BUN_VERSION     Bun runtime version. Default: 1.3.14 (omp requires >=1.3.14).
+#   NODE_VERSION    Node.js runtime version. Default: 26-slim.
 
 ARG NODE_VERSION=26-slim
 ARG OMP_VERSION=18.1.15
@@ -31,52 +31,46 @@ RUN --mount=type=cache,target=/root/.npm \
     npm install --omit=dev --no-audit --no-fund \
         @kahme247/ompweb@${OMPWEB_VERSION}
 
-# ---- Stage 2: download the omp binary ----
-FROM alpine:3.20 AS omp-bin
-ARG OMP_VERSION
-
-RUN apk add --no-cache curl ca-certificates
-
-# Resolve "latest" to the current release tag (strip the leading 'v' that GitHub
-# uses), then download the glibc-compiled linux/amd64 binary. Validate via the
-# ELF magic-byte check (not execution) — this stage never runs the binary, so
-# the host libc doesn't matter. The Debian runtime stage is where omp runs.
-RUN set -eux; \
-    if [ "$OMP_VERSION" = "latest" ]; then \
-        OMP_VERSION=$(curl -fsSL https://api.github.com/repos/can1357/oh-my-pi/releases/latest \
-            | sed -nE 's/.*"tag_name":\s*"v?([^"]+)".*/\1/p' | head -n1); \
-    fi; \
-    echo "Resolved OMP_VERSION=${OMP_VERSION}"; \
-    curl -fsSL -o /usr/local/bin/omp \
-        "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/omp-linux-x64"; \
-    chmod +x /usr/local/bin/omp; \
-    # Validate the file is a 64-bit ELF executable — catches 404 HTML pages,
-    # empty responses, and partial downloads in one shot.
-    head -c 4 /usr/local/bin/omp | grep -q "ELF" || { echo "omp binary failed ELF magic check"; exit 1; }; \
-    SIZE=$(stat -c %s /usr/local/bin/omp); \
-    echo "omp binary ready: ${SIZE} bytes"
-
-# ---- Stage 3: runtime ----
+# ---- Stage 2: runtime ----
 FROM node:${NODE_VERSION} AS runtime
 
 # tini for proper signal forwarding as PID 1; wget for the healthcheck;
-# gosu for privilege drop in the entrypoint script.
+# gosu for privilege drop in the entrypoint script; curl + unzip for Bun install.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        tini wget ca-certificates gosu \
+        tini wget ca-certificates gosu curl unzip \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 1001 -r app \
     && useradd -u 1001 -r -g app -d /app -s /sbin/nologin app
 
-# Install omp's native addon (bundles pi_natives.linux-x64-{baseline,modern}.node).
-# omp is a Bun-compiled binary that bundles its own JS runtime, but it needs
-# these native addons present on disk at a discoverable path. The entrypoint
-# script copies them into /app/.omp/natives/<version>/ and chowns to the
-# app user before dropping privileges.
+# Install Bun — omp and the @oh-my-pi/pi-coding-agent package are
+# Bun-compiled (uses bun:ffi, Bun.hash, Bun.inspect) and require the
+# Bun runtime, not Node. The package's prepack script bundles cli.js;
+# the binary at /usr/local/bin/omp is a Bun shim that calls into it.
+ARG BUN_VERSION=1.3.14
+ENV BUN_INSTALL=/usr/local/bun
+RUN curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" -o /tmp/bun.zip \
+    && unzip -j /tmp/bun.zip 'bun-linux-x64/bun' -d /tmp/bun-extract \
+    && mv /tmp/bun-extract/bun /usr/local/bin/bun \
+    && chmod +x /usr/local/bin/bun \
+    && rm -rf /tmp/bun.zip /tmp/bun-extract \
+    && /usr/local/bin/bun --version
+ENV PATH="/usr/local/bin:${PATH}"
+
+# Install omp via Bun global. The `@oh-my-pi/pi-coding-agent` package
+# bundles its own cli.js (prebuilt by the package's `prepack` script)
+# and pulls in `@oh-my-pi/pi-natives-linux-x64` (the platform-specific
+# native addons). `bun install -g` puts the wrapper at
+# /usr/local/bun/bin/omp; we symlink to /usr/local/bin/omp for the
+# OMP_WEB_OMP_BIN env var. --trust-all allows the natives package's
+# postinstall script to extract its prebuilt .node files.
 ARG OMP_VERSION
-RUN --mount=type=cache,target=/root/.npm \
-    npm install --no-audit --no-fund --global \
-        @oh-my-pi/pi-natives-linux-x64@${OMP_VERSION}
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --global --trust-all \
+        @oh-my-pi/pi-coding-agent@${OMP_VERSION} \
+    && ln -sf /usr/local/bun/bin/omp /usr/local/bin/omp \
+    && test -x /usr/local/bin/omp || { echo "omp binary missing after bun install"; exit 1; } \
+    && /usr/local/bin/omp --version
 
 WORKDIR /app
 
@@ -85,9 +79,6 @@ COPY --from=ompweb-install --chown=app:app /app/node_modules ./node_modules
 COPY --from=ompweb-install --chown=app:app /app/package.json ./package.json
 COPY --from=ompweb-install --chown=app:app /app/package-lock.json ./package-lock.json
 
-# omp binary.
-COPY --from=omp-bin /usr/local/bin/omp /usr/local/bin/omp
-
 # Entrypoint.
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
@@ -95,6 +86,10 @@ ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=30177 \
     OMP_WEB_HOSTNAME=0.0.0.0 \
+    # Redirect omp's HOME-relative writes (~/.omp, ~/.local/share) into
+    # the persistent volume. Without this, omp tries to mkdir /app/.omp
+    # which is root-owned and EACCES for the app user.
+    HOME=/data/omp \
     PI_CODING_AGENT_DIR=/data/omp \
     OMP_WEB_OMP_BIN=/usr/local/bin/omp \
     OMP_WEB_NO_OPEN=1 \

@@ -9,13 +9,16 @@
 
 set -eu
 
+# Force directories to be group-readable/writable so the app user can
+# access them. Without this, the inherited umask 077 leaves dirs at
+# mode 700 — which blocks even root from re-chowning on subsequent
+# runs (cap_drop: ALL removes DAC_OVERRIDE).
+umask 0022
+
 HOST="${OMP_WEB_HOSTNAME:-0.0.0.0}"
 PORT="${PORT:-30177}"
 PASS="${OMP_WEB_PASSWORD:-}"
 AGENT_DIR="${PI_CODING_AGENT_DIR:-/data/omp}"
-# Pinned at build time via the OMP_VERSION ARG.
-NATIVES_SRC="/usr/lib/node_modules/@oh-my-pi/pi-natives-linux-x64"
-NATIVES_DST="/app/.omp/natives/${OMP_PINNED_VERSION:-18.1.15}"
 
 if [ "$HOST" != "127.0.0.1" ] && [ -z "$PASS" ]; then
     echo "ERROR: OMP_WEB_PASSWORD must be set when OMP_WEB_HOSTNAME is not 127.0.0.1." >&2
@@ -27,17 +30,8 @@ fi
 # write here at runtime, so we create the directory and chown it to
 # the app user. Idempotent on subsequent runs.
 mkdir -p "$AGENT_DIR"
+chmod 0755 "$AGENT_DIR"  # ensure root can re-chown if omp sets 0700 inside
 chown -R 1001:1001 "$AGENT_DIR"
-
-# omp looks for its native addons at /app/.omp/natives/<version>/. The
-# addon package was installed globally at build time; copy the .node
-# files into the location omp expects, and chown to the app user so
-# they can dlopen() them at runtime.
-if [ -d "$NATIVES_SRC" ]; then
-    mkdir -p "$NATIVES_DST"
-    cp "$NATIVES_SRC"/pi_natives.linux-x64-*.node "$NATIVES_DST/" 2>/dev/null || true
-    chown -R 1001:1001 /app/.omp
-fi
 
 echo "Starting ompweb on ${HOST}:${PORT} (agent dir: ${AGENT_DIR})"
 

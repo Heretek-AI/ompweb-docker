@@ -9,7 +9,7 @@ services:
   ompweb:
     # Override GHCR_OWNER in .env if you forked this repo. The default assumes
     # the canonical org is kahme247; change to your own namespace if you forked.
-    image: ghcr.io/${GHCR_OWNER:-heretek-ai}/ompweb-docker:${TAG:-latest}
+    image: ompweb:local
     container_name: ompweb
     restart: unless-stopped
 
@@ -30,10 +30,16 @@ services:
       # to the app user via setresuid/setresgid. Same justification —
       # only affects user switching within the container, not external
       # privilege.
+#
+      # CAP_DAC_OVERRIDE lets root bypass file-mode checks when the
+      # entrypoint chowns the persistent volume on subsequent starts
+      # (omp creates internal dirs at mode 0700, which would otherwise
+      # lock out the re-chown). Tightest justifiable addition.
     cap_add:
       - CHOWN
       - SETUID
       - SETGID
+      - DAC_OVERRIDE
     # Don't set `user:` here — the entrypoint script runs as root to
     # initialize /data/omp on first start (named volumes are root-owned
     # by default) and then drops to UID 1001 via gosu. The Docker
