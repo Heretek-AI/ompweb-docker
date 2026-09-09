@@ -20,7 +20,10 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    user: "1001:1001"
+    # Don't set `user:` here — the entrypoint script runs as root to
+    # initialize /data/omp on first start (named volumes are root-owned
+    # by default) and then drops to UID 1001 via su-exec. The Docker
+    # runtime still enforces no-new-privileges so the drop is safe.
 
     ports:
       - "30177:30177"

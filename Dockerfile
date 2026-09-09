@@ -58,10 +58,11 @@ RUN set -eux; \
 # ---- Stage 3: runtime ----
 FROM node:${NODE_VERSION} AS runtime
 
-# tini for proper signal forwarding as PID 1; wget for the healthcheck.
+# tini for proper signal forwarding as PID 1; wget for the healthcheck;
+# su-exec for privilege drop in the entrypoint script.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        tini wget ca-certificates \
+        tini wget ca-certificates su-exec \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 1001 -r app \
     && useradd -u 1001 -r -g app -d /app -s /sbin/nologin app
