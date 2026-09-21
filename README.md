@@ -70,7 +70,7 @@ tar xzf omp-sandbox-backup.tgz -C .
 | `OMPWEB_REF` | `main` | Branch, tag, or SHA. |
 | `BUN_VERSION` | `1.4.2` | Bun runtime (the engine runs on Bun). |
 | `UV_VERSION` | `0.12.17` | uv/uvx for Python tooling. |
-| `NODE_VERSION` | `22-bookworm-slim` | Node base image for the builder and runtime stages. |
+| `NODE_VERSION` | `24-bookworm-slim` | Node base image for the builder and runtime stages. |
 
 Default targets are upstream. For a fork or a patched UI:
 
@@ -326,7 +326,7 @@ server {
 
 `ompweb` does not embed `omp`: it resolves the binary through `OMP_WEB_OMP_BIN` and spawns it with `--mode rpc-ui`, exchanging NDJSON frames over stdio. There is no HTTP server in the engine, which is why both ship in one image.
 
-Bookworm (glibc) is the base because the release binaries, the napi addon, tree-sitter, and Python wheels all target glibc; the `node` base is 22.x to satisfy ompweb's `engines.node >= 22.19.0`.
+Bookworm (glibc) is the base because the release binaries, the napi addon, tree-sitter, and Python wheels all target glibc. The `node` base is 24.x: active LTS (EOL 2028-04-30), satisfying ompweb's `engines.node >= 22.19.0` and Next 16's `>=20.9.0`. Node 22 is maintenance-only since 2025-10-21, and ompweb imports `node:sqlite` (`lib/usage-db.ts`), which Node 22 still flags with an `ExperimentalWarning` on every process start. ompweb's own `.nvmrc` pins 22.19.0, so upstream CI runs one LTS behind this image.
 
 ---
 

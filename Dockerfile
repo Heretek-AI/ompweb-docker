@@ -3,16 +3,16 @@
 # omp-sandbox — turnkey oh-my-pi (omp) agent engine + ompweb web UI.
 #
 # Layout:
-#   ompweb-builder  node:22-bookworm-slim  → clone + `next build` ompweb
-#   omp-release     node:22-bookworm-slim  → download the platform release binary
+#   ompweb-builder  node:24-bookworm-slim  → clone + `next build` ompweb
+#   omp-release     node:24-bookworm-slim  → download the platform release binary
 #   omp-source      rust:1.86-slim-bookworm→ clone + cargo/napi-build omp from source
 #   omp-artifacts   selector: omp-${OMP_BUILD}
-#   runtime         node:22-bookworm-slim  → both payloads, unprivileged user, entrypoint
+#   runtime         node:24-bookworm-slim  → both payloads, unprivileged user, entrypoint
 #
 # Every build arg is declared before the first FROM so it is usable in FROM
 # lines; each stage that reads an arg re-declares it (an arg declared before
 # the first FROM is empty inside a stage until re-declared).
-ARG NODE_VERSION=22-bookworm-slim
+ARG NODE_VERSION=24-bookworm-slim
 ARG BUN_VERSION=1.4.2
 ARG UV_VERSION=0.12.17
 ARG OMP_REPO=can1357/oh-my-pi
