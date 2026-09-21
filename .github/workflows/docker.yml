@@ -163,6 +163,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # GHCR requires a lowercase repository name; github.repository preserves
+      # the owner's casing (e.g. Heretek-AI/ompweb-docker).
+      - name: Compute lowercase image name
+        run: echo "IMAGE=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
@@ -171,7 +176,7 @@ jobs:
           file: ./Dockerfile
           platforms: linux/${{ matrix.arch }}
           push: true
-          tags: ${{ env.REGISTRY }}/${{ github.repository }}:build-${{ matrix.arch }}
+          tags: ${{ env.IMAGE }}:build-${{ matrix.arch }}
           build-args: |
             OMP_REPO=${{ inputs.omp_repo || 'can1357/oh-my-pi' }}
             OMP_REF=${{ inputs.omp_ref || 'main' }}
@@ -222,6 +227,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Compute lowercase image name
+        run: echo "IMAGE=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       - name: Merge and tag the multi-arch image
         env:
           OMP_TAG: ${{ needs.resolve.outputs.omp_tag }}
@@ -230,7 +238,7 @@ jobs:
           PUSH_LATEST: ${{ github.event_name == 'push' || github.event_name == 'schedule' || inputs.push_latest }}
         run: |
           set -euo pipefail
-          image="${REGISTRY}/${GITHUB_REPOSITORY,,}"
+          image="$IMAGE"
 
           args=()
           for digest in /tmp/digests/digest-*; do
@@ -253,7 +261,7 @@ jobs:
         # Advisory only: a finding never gates the release.
         uses: aquasecurity/trivy-action@0.36.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.resolve.outputs.version_tag }}
+          image-ref: ${{ env.IMAGE }}:${{ needs.resolve.outputs.version_tag }}
           format: table
           exit-code: '0'
           ignore-unfixed: true
