@@ -175,8 +175,6 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: linux/${{ matrix.arch }}
-          push: true
-          tags: ${{ env.IMAGE }}:build-${{ matrix.arch }}
           build-args: |
             OMP_REPO=${{ inputs.omp_repo || 'can1357/oh-my-pi' }}
             OMP_REF=${{ inputs.omp_ref || 'main' }}
@@ -191,7 +189,11 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
           provenance: true
           sbom: true
-          outputs: type=image,push-by-digest=true,name-canonical=true
+          # The repository name must ride in the output's `name=` attribute rather
+          # than in the action's tag and push inputs: buildx copies those inputs
+          # into the same attribute, and buildkit then refuses to push a ref that
+          # still carries a tag while push-by-digest is set (util/push/push.go).
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
         run: |
@@ -259,7 +261,7 @@ jobs:
 
       - name: Scan the published image
         # Advisory only: a finding never gates the release.
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE }}:${{ needs.resolve.outputs.version_tag }}
           format: table
