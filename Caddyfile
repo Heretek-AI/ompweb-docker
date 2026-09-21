@@ -12,13 +12,13 @@
 ompweb.example.com {
     encode zstd gzip
 
-    reverse_proxy 127.0.0.1:30177 {
+    reverse_proxy 127.0.0.1:3000 {
         # Pass client info to ompweb so its auth check sees the real IP.
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
         header_up X-Real-IP {remote_host}
 
-        # The container already exposes 30177 — give it plenty of room for
+        # The container already exposes 3000 — give it plenty of room for
         # long-running AI prompts.
         transport http {
             dial_timeout 30s
@@ -44,5 +44,5 @@ ompweb.example.com {
 # If you also want to expose the site on a non-TLS port for local testing
 # only, listen on a separate hostname or path. Otherwise, delete this block.
 http://ompweb.local {
-    reverse_proxy 127.0.0.1:30177
+    reverse_proxy 127.0.0.1:3000
 }

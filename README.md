@@ -1,100 +1,144 @@
-# ompweb-docker
+# omp-sandbox
 
-Containerized packaging of **[oh-my-pi](https://github.com/can1357/oh-my-pi)** (the `omp` CLI, an AI coding agent by can1357) and **[ompweb](https://github.com/kahme247/ompweb)** (the matching web UI by kahme247), bundled into a single Docker image and auto-published to GitHub Container Registry on every push.
+A turnkey container that hosts **[oh-my-pi](https://github.com/can1357/oh-my-pi)** (the `omp` coding-agent engine) and **[ompweb](https://github.com/kahme247/ompweb)** (its web UI) in one image, with persistent state, host-UID alignment, and Docker access for the agent.
 
-Use this instead of running `omp` on bare metal. State lives in a Docker volume; upgrades are a `docker compose pull`.
+The image contains the launcher, the engine, and the UI. At runtime the container starts as root only long enough to remap `PUID`/`PGID`, join the mounted Docker socket's group, chown the volumes, and seed a workspace registry — then drops to the unprivileged `omp` user with `gosu` before any user code runs.
 
----
-
-## Why a wrapper repo?
-
-The upstream `ompweb` repo has **no Docker artifacts at all** — it's distributed only via npm. This wrapper repo contains just the Docker infrastructure (Dockerfile, compose, workflow, docs). At image build time we:
-
-1. `npm install @kahme247/ompweb@<version>` — the published tarball ships a **pre-built** `.next/` bundle (the package's `prepack` script runs `next build` before publishing), so no build step is needed in Docker.
-2. Download the static `omp-linux-x64` binary from `can1357/oh-my-pi/releases` (the `@oh-my-pi/pi-coding-agent` npm package is Bun-only source code and not installable in plain Node).
-
-| Component | Upstream | Source |
+| Component | Upstream | How it gets in the image |
 |---|---|---|
-| Web UI | <https://github.com/kahme247/ompweb> | npm `@kahme247/ompweb` |
-| Agent CLI | <https://github.com/can1357/oh-my-pi> | GitHub Releases `omp-linux-x64` |
+| Agent engine | <https://github.com/can1357/oh-my-pi> | `OMP_BUILD=release`: platform release binary. `OMP_BUILD=source`: cloned + built (cargo/napi addon). |
+| Web UI | <https://github.com/kahme247/ompweb> | Cloned and built with `next build`, then `npm prune --omit=dev`. |
 | This wrapper | — | MIT |
+
+Both upstream sources are selected at build time via `OMP_REPO`/`OMP_REF` and `OMPWEB_REPO`/`OMPWEB_REF`, so a fork or an unreleased ref is one `--build-arg` away.
 
 ---
 
 ## Quick start
 
-Requires Docker 24+ and Compose v2.
+Requires Docker 24+ (or Podman 5+) with Compose v2.
 
 ```sh
-# 1. Get the wrapper files
-git clone https://github.com/<you>/ompweb-docker.git
+git clone https://github.com/Heretek-AI/ompweb-docker.git
 cd ompweb-docker
 
-# 2. Configure
 cp .env.example .env
-$EDITOR .env            # set OMP_WEB_PASSWORD at minimum
+$EDITOR .env                                  # set OMP_WEB_PASSWORD at minimum
 
-# 3. Run
+mkdir -p workspace data/omp data/config data/ssh
+chmod 700 data/ssh                            # SSH keys are mounted read-only
+
 docker compose pull
 docker compose up -d
-
-# 4. Open http://localhost:30177
+# open http://localhost:3000
 ```
 
-The first run pulls the image from `ghcr.io/<owner>/ompweb-docker:latest`. Use `docker compose logs -f ompweb` to watch Next.js boot.
+`docker compose logs -f ompweb` shows the entrypoint banner, the engine-version line, and the Next.js boot output.
 
 ---
 
-## Image tags
+## Volumes
 
-The workflow in `.github/workflows/docker.yml` produces:
+Every state path is a bind mount, so backup is a `tar` over `./data` and your files are visible on the host.
 
-| Event | Tags pushed |
-|---|---|
-| Push to `main` | `main`, `main-<sha>`, `latest` |
-| Tag `v1.2.3` | `1.2.3`, `1.2`, `1`, `v1.2.3` (and `latest` if this is the newest release) |
-| Pull request | *(no push — build only, image is discarded)* |
-| Manual dispatch | tags for the current ref |
-
-Pin to a specific tag for reproducibility:
-
-```yaml
-# docker-compose.yml
-image: ghcr.io/<owner>/ompweb-docker:18.1.15    # OMP_VERSION=18.1.15 build
-# or for a specific ompweb npm version:
-image: ghcr.io/<owner>/ompweb-docker:0.4.2       # OMPWEB_VERSION=0.4.2 build
-```
-
----
-
-## Persistent data
-
-The container stores two kinds of state:
-
-| What | Where | How to persist |
+| Container path | Host default | Contents |
 |---|---|---|
-| omp config, models, MCP servers, session index | `/data/omp` (mapped to `~/.omp/agent`) | Named volume `ompweb_data` (default) |
-| Project session JSONLs, project memory | The cwd being worked on | Bind-mount your source code (`./workspace:/workspace`) |
+| `/workspace` | `./workspace` | Your code — the workspace omp edits. |
+| `/home/omp/.omp` | `./data/omp` | Agent state: `agent/sessions/`, blobs, `agent/projects.json`, `agent/models.yml`, `agent/config.yml`, `agent.db`, `skills/`, `agents/`. |
+| `/home/omp/.config` | `./data/config` | Tool config: `gh` auth, `git/config`. |
+| `/home/omp/.ssh` | `./data/ssh` (read-only) | SSH keys for git/remote access. |
+| `/var/run/docker.sock` | host socket | Docker CLI access from inside the container. |
 
-By default only `ompweb_data` is mounted. To let `omp` actually edit your code, uncomment the workspace line in `docker-compose.yml` and set `WORKSPACE_DIR` in `.env` to the directory you want to work on. In the ompweb UI, set the project cwd to `/workspace/<your-project>`.
+Backup and restore:
+
+```sh
+tar czf omp-sandbox-backup.tgz -C . data workspace
+tar xzf omp-sandbox-backup.tgz -C .
+```
 
 ---
 
-## Using a custom OpenAI-compatible endpoint
+## Build arguments
 
-Point omp at any OpenAI-compatible service (OpenRouter, LM Studio, Together AI, Ollama with the OpenAI-compat shim, vLLM, etc.) by adding a few lines to `.env`. On the next container start, the entrypoint writes `~/.omp/agent/models.yml` and `config.yml` for you — no YAML knowledge required.
+| Argument | Default | Purpose |
+|---|---|---|
+| `OMP_REPO` | `can1357/oh-my-pi` | Agent source repository. |
+| `OMP_REF` | `main` | Branch, tag, or SHA. |
+| `OMP_BUILD` | `release` | `release` downloads the platform binary; `source` clones and builds. |
+| `OMP_VERSION` | `latest` | Release tag to download (release mode). `latest` resolves via the GitHub API. |
+| `OMPWEB_REPO` | `kahme247/ompweb` | Web UI source repository. |
+| `OMPWEB_REF` | `main` | Branch, tag, or SHA. |
+| `BUN_VERSION` | `1.4.2` | Bun runtime (the engine runs on Bun). |
+| `UV_VERSION` | `0.12.17` | uv/uvx for Python tooling. |
+| `NODE_VERSION` | `22-bookworm-slim` | Node base image for the builder and runtime stages. |
 
-| Var | Example |
+Default targets are upstream. For a fork or a patched UI:
+
+```sh
+docker build \
+  --build-arg OMPWEB_REPO=Heretek-AI/ompweb \
+  --build-arg OMPWEB_REF=my-branch \
+  -t omp-sandbox:fork .
+```
+
+Private repositories are reachable without baking a token into image history:
+
+```sh
+docker build --secret id=github_token,src=<(printf %s "$GITHUB_TOKEN") .
+```
+
+Omitting the secret is valid for public repos.
+
+---
+
+## `OMP_BUILD=release` vs `OMP_BUILD=source`
+
+| | `release` (default) | `source` |
+|---|---|---|
+| What it does | Downloads `omp-linux-<arch>` from the release for the resolved tag and verifies its SHA-256 against `SHA256SUMS.txt`. | Clones the repo, installs the workspace with Bun, builds the native addon through cargo/napi, and generates the tool-view bundle. |
+| Build time | Seconds to a couple of minutes. | Tens of minutes (Rust + napi). |
+| Works for | Any published release. | Arbitrary refs, forks, and unreleased commits. |
+| Requirement | A release must exist for the tag. | The Rust toolchain in the builder (already in the `omp-source` stage). |
+
+`OMP_REF` does not participate in release mode: when it is not itself version-shaped, the newest release is used and the build prints `WARNING: OMP_BUILD=release ignores OMP_REF; using latest release <tag>`. Use `OMP_BUILD=source` when you need the exact commit.
+
+---
+
+## Docker inside the agent
+
+The image ships the Docker **client only**; the daemon is the host's, reached through the mounted socket. At startup the entrypoint reads the socket's GID, reuses or creates a matching group, and adds `omp` to it, so `docker ps` works inside the container without running as root.
+
+- Hosts without a Docker daemon: Docker creates a **directory** at a missing bind source. Comment out the socket line in `docker-compose.yml`; the entrypoint detects the absence and logs `docker socket not mounted; skipping docker group`.
+- **Security:** socket access is equivalent to root on the host. Only expose this container to people you would give host root.
+
+This is what makes MCP servers and sibling-container workflows usable from inside the sandbox.
+
+---
+
+## Credential persistence
+
+| Credential | How to set it | Where it persists |
+|---|---|---|
+| API keys | `.env` → `env_file` | Never written to disk by the container. |
+| GitHub CLI auth | `docker exec -it ompweb gh auth login` | `/home/omp/.config/gh` → `./data/config`. |
+| Git identity | `docker exec ompweb git config --global user.email ...` | `/home/omp/.config/git/config` → `./data/config`. |
+| SSH keys | Place them in `./data/ssh` (`chmod 700`) | Mounted read-only at `/home/omp/.ssh`. |
+
+---
+
+## Custom OpenAI-compatible provider
+
+Set the six `OMP_PROVIDER_*` variables and the entrypoint writes `~/.omp/agent/models.yml` and `config.yml` on first start. It is idempotent: existing files are never overwritten, so your manual edits survive restarts.
+
+| Variable | Example |
 |---|---|
 | `OMP_PROVIDER_LABEL` | `openrouter` |
 | `OMP_PROVIDER_BASE_URL` | `https://openrouter.ai/api/v1` |
 | `OMP_PROVIDER_API_KEY` | `sk-or-v1-...` |
-| `OMP_PROVIDER_API` | `openai-completions` (or `openai-responses`) |
+| `OMP_PROVIDER_API` | `openai-completions` |
 | `OMP_PROVIDER_MODEL_ID` | `anthropic/claude-3.5-sonnet` |
-| `OMP_PROVIDER_MODEL_NAME` | `Claude 3.5 Sonnet` (optional, defaults to MODEL_ID) |
-| `OMP_DEFAULT_MODEL` | `openrouter/anthropic/claude-3.5-sonnet` (optional; for IDs that themselves contain `/`) |
-
-Leave all six blank to use the built-in providers (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.).
+| `OMP_PROVIDER_MODEL_NAME` | optional, defaults to `OMP_PROVIDER_MODEL_ID` |
+| `OMP_DEFAULT_MODEL` | optional `modelRoles.default`; needed when the model ID itself contains `/` |
 
 **OpenRouter:**
 
@@ -105,11 +149,10 @@ OMP_PROVIDER_API_KEY=sk-or-v1-...
 OMP_PROVIDER_API=openai-completions
 OMP_PROVIDER_MODEL_ID=anthropic/claude-3.5-sonnet
 OMP_PROVIDER_MODEL_NAME=Claude 3.5 Sonnet
-# OpenRouter model IDs contain '/'; set this explicitly to avoid ambiguity.
 OMP_DEFAULT_MODEL=openrouter/anthropic/claude-3.5-sonnet
 ```
 
-**LM Studio (local):**
+**LM Studio (host):**
 
 ```sh
 OMP_PROVIDER_LABEL=lmstudio
@@ -119,7 +162,7 @@ OMP_PROVIDER_API=openai-completions
 OMP_PROVIDER_MODEL_ID=qwen2.5-coder-7b
 ```
 
-**Ollama (local):**
+**Ollama (host):**
 
 ```sh
 OMP_PROVIDER_LABEL=ollama
@@ -129,56 +172,101 @@ OMP_PROVIDER_API=openai-completions
 OMP_PROVIDER_MODEL_ID=qwen2.5-coder:7b
 ```
 
-If you've already written `~/.omp/agent/models.yml` by hand (e.g. via `docker exec ompweb sh` and a text editor), the entrypoint won't touch it — your edits survive restarts. To regenerate from env vars, delete the files first:
+`host.docker.internal` resolves on Linux because compose sets `extra_hosts: host.docker.internal:host-gateway`.
+
+To regenerate from environment variables, delete the seeded files and restart:
 
 ```sh
-docker exec ompweb rm /data/omp/models.yml /data/omp/config.yml
+docker exec ompweb rm /home/omp/.omp/agent/models.yml /home/omp/.omp/agent/config.yml
 docker compose restart
 ```
 
 ---
 
-### Backups
+## Sidecar processes
+
+`ompweb` spawns `omp --mode rpc-ui` per session itself; nothing else needs to run for normal use. For an additional long-running omp service (for example a shared credential vault), set `OMP_SIDECAR_CMD`. It runs as the unprivileged `omp` user in the same sandbox, its output is prefixed with `sidecar |`, and it is terminated when the container stops.
 
 ```sh
-docker run --rm \
-  -v ompweb_data:/data \
-  -v "$PWD":/backup \
-  alpine tar czf /backup/ompweb-data.tgz -C / data
+# Remote credential vault
+OMP_SIDECAR_CMD=omp auth-broker serve --bind=127.0.0.1:8765
+
+# Auth gateway (itself a broker client)
+OMP_SIDECAR_CMD=omp auth-gateway serve --bind=127.0.0.1:4000
 ```
 
-### Restore
+---
+
+## Workspace seeding
+
+On first start the entrypoint writes `/home/omp/.omp/agent/projects.json` with the workspace as a registered project, so the UI's project sidebar lists `/workspace` immediately instead of requiring a UI click. The file lives on a bind-mounted volume, so the seed survives restarts and never overwrites your edits. Remove the entry in the UI (or delete the file) to change it.
+
+---
+
+## Updating and image tags
 
 ```sh
-docker run --rm \
-  -v ompweb_data:/data \
-  -v "$PWD":/backup \
-  alpine tar xzf /backup/ompweb-data.tgz -C /
+docker compose pull
+docker compose up -d
 ```
+
+The workflow publishes four tag families:
+
+| Tag | Meaning |
+|---|---|
+| `latest` | Newest successful build (push to `main`, daily schedule, or dispatch with `push_latest`). |
+| `<omp_tag>-<ompweb_tag>` | Exact pair, e.g. `v18.2.7-1a2b3c4`. Immutable; use for reproducibility. |
+| `omp-<omp_tag>` | Tracks the engine only. |
+| `ompweb-<ompweb_tag>` | Tracks the UI only. |
+
+CI resolves the upstream commits on each run and skips the build when the resulting version tag is already published — the daily cron is a no-op unless upstream moved. Dispatch `.github/workflows/docker.yml` manually to pick repos/refs, choose `release` vs `source`, or force a rebuild.
+
+---
+
+## Troubleshooting
+
+**`Refusing to listen on 0.0.0.0 without OMP_WEB_PASSWORD`** — set `OMP_WEB_PASSWORD` in `.env`, or bind to loopback (`OMP_WEB_HOSTNAME=127.0.0.1`) behind a reverse proxy.
+
+**Port already in use** — change `OMPWEB_PORT` in `.env` (host side only; the container always listens on 3000).
+
+**`omp: command not found`** — the engine lives at `/usr/local/bin/omp`. Do not mount anything over `/usr/local/bin`; it would hide the engine and the Bun shim.
+
+**Build fails resolving a release** — no release asset exists for the resolved tag or arch. Build with `OMP_BUILD=source` instead.
+
+**SSH permission warnings** — `chmod 700 data/ssh`; ssh refuses group/other-readable key material.
+
+**`docker: command not found` inside the container** — the socket mount creates a directory when the host path is missing. Check the logs for `docker socket not mounted; skipping docker group` and remove the socket line if the host has no daemon.
+
+**Ownership mismatches in `./workspace`** — set `PUID`/`PGID` in `.env` to `id -u` / `id -g` on the host and restart. The entrypoint remaps the `omp` user on every start.
+
+**`Permission denied` on `/home/omp/.omp` during startup (Fedora/RHEL/CentOS)** — SELinux is enforcing and the bind mounts carry the wrong label. Append `:Z` to the bind mounts in `docker-compose.yml`:
+
+```yaml
+    volumes:
+      - ${WORKSPACE_DIR:-./workspace}:/workspace:Z
+      - ${OMP_DATA_DIR:-./data/omp}:/home/omp/.omp:Z
+      - ${OMP_CONFIG_DIR:-./data/config}:/home/omp/.config:Z
+      - ${OMP_SSH_DIR:-./data/ssh}:/home/omp/.ssh:ro,Z
+```
+
+`:Z` relabels the host directories to a container-private label, so other services will lose access to them; use `:z` instead if more than one container needs them.
 
 ---
 
 ## Exposing to the internet
 
-Do **not** put this container directly on a public IP — `OMP_WEB_PASSWORD` is the only auth, and there is no rate limiting. Always front it with a reverse proxy.
+Do **not** put this container directly on a public IP. `OMP_WEB_PASSWORD` is the only authentication boundary and there is no rate limiting. Front it with a reverse proxy.
 
-### Caddy (recommended — automatic HTTPS)
+The bundled `Caddyfile` shows the correct headers (`X-Forwarded-For`, `X-Forwarded-Proto`, `X-Real-IP`) and unbounded timeouts for long agent turns:
 
 ```sh
-# 1. Edit Caddyfile, replace ompweb.example.com with your domain
 cp Caddyfile /etc/caddy/Caddyfile.d/ompweb.caddy
-$EDITOR /etc/caddy/Caddyfile.d/ompweb.caddy
-
-# 2. Include it from your main Caddyfile:
+$EDITOR /etc/caddy/Caddyfile.d/ompweb.caddy     # set your domain
 echo "import Caddyfile.d/*.caddy" >> /etc/caddy/Caddyfile
-
-# 3. Reload
 systemctl reload caddy
 ```
 
-A sample `Caddyfile` for this repo shows the right headers (`X-Forwarded-*`, `X-Real-IP`) so ompweb sees the real client IP through the proxy.
-
-### nginx
+nginx equivalent:
 
 ```nginx
 server {
@@ -193,7 +281,7 @@ server {
     proxy_send_timeout   3600s;
 
     location / {
-        proxy_pass         http://127.0.0.1:30177;
+        proxy_pass         http://127.0.0.1:3000;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
@@ -205,142 +293,43 @@ server {
 
 ---
 
-## Updating
+## Security notes
 
-```sh
-docker compose pull
-docker compose up -d
-```
-
-The CI rebuilds on every push to `main` and pushes `latest`. Tagged releases (`vX.Y.Z`) push immutable semver tags.
-
-To force a rebuild with a pinned version of `omp` (instead of `latest`):
-
-```sh
-docker build --build-arg OMP_VERSION=18.1.15 --build-arg OMPWEB_VERSION=0.4.2 -t ompweb:custom .
-docker compose up -d   # if your compose points at this local tag
-```
+- `OMP_WEB_PASSWORD` is the only auth boundary; pick a strong, unique value.
+- The runtime process runs as an unprivileged user (`omp`, UID 1000 by default or your `PUID`). `omp`, Node, and every spawned subprocess share that identity.
+- The container starts as root solely to remap UID/GID, join the Docker socket group, and chown mounted volumes. The capability set is deliberately minimal: `CHOWN`, `DAC_OVERRIDE`, `FOWNER` for the volume fix-ups and `SETUID`/`SETGID` for the `gosu` drop, with `cap_drop: [ALL]` and `no-new-privileges: true`.
+- API keys stay in `.env`; the image never contains them. Trivy scans run on every publish (advisory, non-gating).
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────┐
-│ Container (ghcr.io/<owner>/ompweb-docker)       │
-│                                                  │
-│  ENTRYPOINT: tini → docker-entrypoint.sh         │
-│      └─ validates OMP_WEB_PASSWORD (if LAN bind) │
-│      └─ mkdir -p $PI_CODING_AGENT_DIR            │
-│      └─ exec node node_modules/@kahme247/ompweb/bin/omp-web.js │
-│              ├─ listens on 0.0.0.0:30177         │
-│              └─ spawns `omp --mode rpc-ui`       │
-│                 (NDJSON over stdio, per session) │
-│                                                  │
-│  /              rootfs (node:26-slim, Debian)    │
-│  /app/node_modules  npm install of @kahme247/ompweb│
-│  /usr/local/bin/omp  static omp binary (glibc)   │
-│  /data          persistent volume                │
-│      └─ omp/   → ~/.omp/agent  (config, etc.)    │
-│  /workspace     bind-mounted from host           │
-└──────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│ Container (ghcr.io/<owner>/ompweb-docker)              │
+│                                                        │
+│ ENTRYPOINT: tini → docker-entrypoint.sh  (root)        │
+│   ├─ remap PUID/PGID, join docker-socket group         │
+│   ├─ chown + seed /workspace, projects.json            │
+│   ├─ optional OMP_PROVIDER_* seeding, engine probe     │
+│   └─ exec gosu omp:omp node bin/omp-web.js  (:3000)    │
+│            └─ next start  (cwd = /app/ompweb)          │
+│                 └─ spawns `omp --mode rpc-ui` per session │
+│                    (NDJSON over stdio)                 │
+│                                                        │
+│ /opt/omp      engine payload (binary or Bun + /pi tree)│
+│ /app/ompweb   built UI: .next/, node_modules/, bin/    │
+│ /workspace    your code (bind mount)                   │
+│ /home/omp/.omp  agent state (bind mount)               │
+└────────────────────────────────────────────────────────┘
 ```
 
-### Why bundle both?
+`ompweb` does not embed `omp`: it resolves the binary through `OMP_WEB_OMP_BIN` and spawns it with `--mode rpc-ui`, exchanging NDJSON frames over stdio. There is no HTTP server in the engine, which is why both ship in one image.
 
-`ompweb` does not embed `omp`. It locates the `omp` binary via `OMP_WEB_OMP_BIN` (or `$PATH`) and spawns it with `--mode rpc-ui`, exchanging **NDJSON frames over stdio**. There is no HTTP server in `omp`. So the two must run together, and the simplest deployment is one container.
-
-### Why Debian slim?
-
-We use `node:26-slim` (Debian Bookworm, glibc) rather than Alpine for two reasons:
-
-1. **Current Node** — `node:26-slim` tracks the latest 26.x release, which is what users coming to this project expect in 2026.
-2. **glibc-compatible omp binary** — `oh-my-pi` ships a glibc `omp-linux-x64` binary that runs cleanly on Debian with no extra runtime needed (no Bun, no musl loader).
-
-The size penalty vs Alpine (~80MB base vs ~50MB) is small compared to the bundled Next.js build and omp binary (~150MB). To pin a specific Node patch, build with `--build-arg NODE_VERSION=26.8.1-slim`.
-
-### Why not `output: 'standalone'` for Next.js?
-
-We don't build Next.js at all in this image — we install the pre-built tarball from npm. So `output: 'standalone'` is moot here. If upstream ompweb ever switches to standalone, this image would automatically benefit.
-
----
-
-## Security notes
-
-- **`OMP_WEB_PASSWORD` is the only authentication boundary.** Pick something strong; don't reuse another service's password.
-- The container runs as **UID 1001** (non-root), with `cap_drop: [ALL]` and `no-new-privileges`. Subprocess `omp` runs as the same user.
-- The `ompweb_data` volume is the only place persistent state lives. Back it up regularly.
-- API keys are passed via environment variables — never bake them into the image. See `.env.example`.
-- The image is scanned by **Trivy** on every build; results surface in the Actions run summary.
-
----
-
-## Troubleshooting
-
-### "OMP_WEB_PASSWORD must be set when OMP_WEB_HOSTNAME is not 127.0.0.1"
-
-You bound the container to `0.0.0.0` but didn't set a password. Either set `OMP_WEB_PASSWORD` in `.env`, or bind to localhost only (`OMP_WEB_HOSTNAME=127.0.0.1`) and access via a reverse proxy.
-
-### Container is healthy but the UI is blank
-
-`docker compose logs ompweb`. If you see `bind: address already in use`, something else is on port 30177. Change `ports:` in `docker-compose.yml` or stop the conflicting process.
-
-### "omp: command not found" inside the container
-
-The `omp` binary lives at `/usr/local/bin/omp` and is set as `OMP_WEB_OMP_BIN` in the Dockerfile. If you've mounted over `/usr/local/bin`, you've hidden it. Remove the override.
-
-### Image build fails resolving "latest"
-
-The Docker build stage calls `api.github.com` for the latest `omp` release. If GitHub rate-limits you (60/hr unauthenticated), pin a version explicitly: `--build-arg OMP_VERSION=18.1.15`.
-
-### I want a different version of ompweb
-
-```sh
-docker build --build-arg OMPWEB_VERSION=0.4.2 -t ompweb:custom .
-```
-
-Where `0.4.2` is any published version on <https://www.npmjs.com/package/@kahme247/ompweb?activeTab=versions>.
-
----
-
-## Development
-
-### Build locally
-
-```sh
-docker build --build-arg OMPWEB_VERSION=latest -t ompweb:dev .
-docker run --rm ompweb:dev omp --version    # sanity check
-docker run --rm ompweb:dev ls node_modules/@kahme247/ompweb/.next  # confirm prebuilt .next exists
-```
-
-### Run with a local compose override
-
-```sh
-docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
-```
-
-A typical override might point at a locally-built image:
-
-```yaml
-# docker-compose.override.yml
-services:
-  ompweb:
-    image: ompweb:dev
-    build: .
-```
-
-### Lint the workflow / Dockerfile
-
-```sh
-# Docker
-docker run --rm -i hadolint/hadolint < Dockerfile
-
-# GitHub Actions
-actionlint .github/workflows/docker.yml
-```
+Bookworm (glibc) is the base because the release binaries, the napi addon, tree-sitter, and Python wheels all target glibc; the `node` base is 22.x to satisfy ompweb's `engines.node >= 22.19.0`.
 
 ---
 
 ## License
 
-MIT for the wrapper files in this repo. See upstream projects for their own licenses.
+MIT for the wrapper files in this repo. See the upstream projects for their own licenses.

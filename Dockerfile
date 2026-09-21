@@ -1,120 +1,268 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 #
-# Multi-stage build for ompweb + oh-my-pi (omp).
+# omp-sandbox — turnkey oh-my-pi (omp) agent engine + ompweb web UI.
 #
-# Stage 1 (ompweb-install): `npm install @kahme247/ompweb` — its published tarball
-#                           ships .next/ pre-built (see the package's `prepack` script),
-#                           so we skip next build entirely.
-# Stage 2 (runtime):        node:26-slim + Bun + tini + the omp binary
-#                           installed via `bun install -g @oh-my-pi/pi-coding-agent`.
-#                           Bun is required because the omp wrapper is Bun-compiled.
-#                           The whole container runs as UID 1001 (no root, no gosu).
+# Layout:
+#   ompweb-builder  node:22-bookworm-slim  → clone + `next build` ompweb
+#   omp-release     node:22-bookworm-slim  → download the platform release binary
+#   omp-source      rust:1.86-slim-bookworm→ clone + cargo/napi-build omp from source
+#   omp-artifacts   selector: omp-${OMP_BUILD}
+#   runtime         node:22-bookworm-slim  → both payloads, unprivileged user, entrypoint
 #
-# Build args:
-#   OMPWEB_VERSION  @kahme247/ompweb version. Default: latest.
-#   OMP_VERSION     @oh-my-pi/pi-coding-agent version. Default: 18.1.15.
-#   BUN_VERSION     Bun runtime version. Default: 1.3.14 (omp requires >=1.3.14).
-#   NODE_VERSION    Node.js runtime version. Default: 26-slim.
+# Every build arg is declared before the first FROM so it is usable in FROM
+# lines; each stage that reads an arg re-declares it (an arg declared before
+# the first FROM is empty inside a stage until re-declared).
+ARG NODE_VERSION=22-bookworm-slim
+ARG BUN_VERSION=1.4.2
+ARG UV_VERSION=0.12.17
+ARG OMP_REPO=can1357/oh-my-pi
+ARG OMP_REF=main
+ARG OMP_BUILD=release
+ARG OMP_VERSION=latest
+ARG OMPWEB_REPO=kahme247/ompweb
+ARG OMPWEB_REF=main
 
-ARG NODE_VERSION=26-slim
-ARG OMP_VERSION=18.1.15
+# ---- Stage: ompweb-builder ----
+FROM node:${NODE_VERSION} AS ompweb-builder
+ARG OMPWEB_REPO
+ARG OMPWEB_REF
 
-# ---- Stage 1: install ompweb from npm ----
-FROM node:${NODE_VERSION} AS ompweb-install
-ARG OMPWEB_VERSION=latest
-WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# The npm tarball already contains a pre-built .next/ bundle (verified:
-# tarball includes .next/BUILD_ID, .next/server, .next/static, etc.) so we
-# just install the package + its runtime dependencies. --omit=dev skips the
-# Next.js compilation toolchain that we no longer need.
+# Shared clone recipe: branch, tag, and bare SHA all work (a shallow
+# `--branch` clone cannot check out a bare SHA, so we init + fetch by ref).
+# The optional `github_token` secret keeps private forks reachable without a
+# token ever landing in image history.
+RUN --mount=type=secret,id=github_token \
+    set -eux; \
+    mkdir -p /src/ompweb; cd /src/ompweb; \
+    git init -q; \
+    git remote add origin "https://github.com/${OMPWEB_REPO}.git"; \
+    if [ -s /run/secrets/github_token ]; then \
+      git config --local credential.helper \
+        '!f() { printf "username=x-access-token\npassword=%s\n" "$(cat /run/secrets/github_token)"; }; f'; \
+    fi; \
+    git fetch -q --depth 1 origin "${OMPWEB_REF}"; \
+    git checkout -q FETCH_HEAD; \
+    git rev-parse HEAD > .git-resolved; \
+    rm -rf .git
+
+WORKDIR /src/ompweb
+# dev deps are required: Tailwind v4 / postcss / TypeScript are build-time only.
 RUN --mount=type=cache,target=/root/.npm \
-    npm install --omit=dev --no-audit --no-fund \
-        @kahme247/ompweb@${OMPWEB_VERSION}
+    npm ci --no-audit --no-fund
+# `next build --webpack`; next/font/google needs egress to fonts.googleapis.com.
+RUN npm run build
+# Drop the build toolchain but keep every production dep (next, react,
+# undici, yaml, mammoth, mermaid, katex, react-markdown, dbus-next, ...).
+RUN npm prune --omit=dev
 
-# ---- Stage 2: runtime ----
-FROM node:${NODE_VERSION} AS runtime
+# ---- Stage: omp-release (download a published release binary) ----
+FROM node:${NODE_VERSION} AS omp-release
+ARG OMP_REPO
+ARG OMP_REF
+ARG OMP_VERSION
 
-# tini for proper signal forwarding as PID 1; wget for the healthcheck;
-# curl + unzip for Bun install. No gosu: the container runs entirely as
-# UID 1001 (never root), so no privilege-drop tool is needed.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) arch=x64 ;; \
+      arm64) arch=arm64 ;; \
+      *) echo "unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    if [ "${OMP_VERSION}" != "latest" ]; then \
+      tag="${OMP_VERSION}"; \
+    elif printf '%s' "${OMP_REF}" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then \
+      tag="${OMP_REF}"; \
+    else \
+      tag="$(curl -fsSL "https://api.github.com/repos/${OMP_REPO}/releases/latest" \
+             | grep -o '"tag_name": *"[^"]*"' | head -n1 | sed 's/.*"\([^"]*\)"$/\1/')"; \
+      echo "WARNING: OMP_BUILD=release ignores OMP_REF; using latest release ${tag}" >&2; \
+    fi; \
+    test -n "${tag}"; \
+    base="https://github.com/${OMP_REPO}/releases/download/${tag}"; \
+    mkdir -p /opt/omp; \
+    curl -fsSL "${base}/omp-linux-${arch}" -o /opt/omp/omp; \
+    curl -fsSL "${base}/SHA256SUMS.txt" -o /tmp/SHA256SUMS.txt; \
+    expect="$(grep " omp-linux-${arch}\$" /tmp/SHA256SUMS.txt | awk '{print $1}')"; \
+    test -n "${expect}"; \
+    actual="$(sha256sum /opt/omp/omp | awk '{print $1}')"; \
+    if [ "${expect}" != "${actual}" ]; then \
+      echo "sha256 mismatch for omp-linux-${arch}: expected ${expect}, got ${actual}" >&2; exit 1; \
+    fi; \
+    rm -f /tmp/SHA256SUMS.txt; \
+    chmod 0755 /opt/omp/omp; \
+    /opt/omp/omp --version; \
+    printf '%s\n' "${tag}" > /opt/omp/VERSION
+
+# ---- Stage: omp-source (clone + build the natives addon) ----
+FROM rust:1.86-slim-bookworm AS omp-source
+ARG OMP_REPO
+ARG OMP_REF
+ARG BUN_VERSION
+
+# clang/libclang-dev for bindgen over pipewire-sys/libspa-sys; cmake/make/
+# ninja for opusic-sys's bundled Opus.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        tini wget ca-certificates curl unzip \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd -g 1001 -r app \
-    && useradd -u 1001 -r -g app -d /app -s /sbin/nologin app
+        git curl ca-certificates unzip pkg-config libssl-dev build-essential \
+        clang libclang-dev cmake make ninja-build \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Bun — omp and the @oh-my-pi/pi-coding-agent package are
-# Bun-compiled (uses bun:ffi, Bun.hash, Bun.inspect) and require the
-# Bun runtime, not Node. The package's prepack script bundles cli.js;
-# the binary at /usr/local/bin/omp is a Bun shim that calls into it.
-ARG BUN_VERSION=1.3.14
-ENV BUN_INSTALL=/usr/local/bun
-RUN curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" -o /tmp/bun.zip \
-    && unzip -j /tmp/bun.zip 'bun-linux-x64/bun' -d /tmp/bun-extract \
-    && mv /tmp/bun-extract/bun /usr/local/bin/bun \
-    && chmod +x /usr/local/bin/bun \
-    && rm -rf /tmp/bun.zip /tmp/bun-extract \
-    && /usr/local/bin/bun --version
-ENV PATH="/usr/local/bin:${PATH}"
+ARG BUN_VERSION
+RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/opt/bun bash -s "bun-v${BUN_VERSION}"
+ENV PATH=/opt/bun/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin
 
-# Install omp via Bun global. The `@oh-my-pi/pi-coding-agent` package
-# bundles its own cli.js (prebuilt by the package's `prepack` script)
-# and pulls in `@oh-my-pi/pi-natives-linux-x64` (the platform-specific
-# native addons). `bun install -g` puts the wrapper at
-# /usr/local/bun/bin/omp; we symlink to /usr/local/bin/omp for the
-# OMP_WEB_OMP_BIN env var. --trust-all allows the natives package's
-# postinstall script to extract its prebuilt .node files.
-ARG OMP_VERSION
+RUN --mount=type=secret,id=github_token \
+    set -eux; \
+    mkdir -p /pi; cd /pi; \
+    git init -q; \
+    git remote add origin "https://github.com/${OMP_REPO}.git"; \
+    if [ -s /run/secrets/github_token ]; then \
+      git config --local credential.helper \
+        '!f() { printf "username=x-access-token\npassword=%s\n" "$(cat /run/secrets/github_token)"; }; f'; \
+    fi; \
+    git fetch -q --depth 1 origin "${OMP_REF}"; \
+    git checkout -q FETCH_HEAD; \
+    git rev-parse HEAD > .git-resolved; \
+    rm -rf .git
+
+WORKDIR /pi
+# Reads the clone's rust-toolchain.toml (nightly-2026-08-12) and installs it.
+RUN rustup show
+
+# Hoisted workspace install; --ignore-scripts skips the root `prepare` hook
+# that generates tool-views.generated.js (regenerated explicitly below).
 RUN --mount=type=cache,target=/root/.bun/install/cache \
-    bun install --global --trust-all \
-        @oh-my-pi/pi-coding-agent@${OMP_VERSION} \
-    && ln -sf /usr/local/bun/bin/omp /usr/local/bin/omp \
-    && test -x /usr/local/bin/omp || { echo "omp binary missing after bun install"; exit 1; } \
-    && /usr/local/bin/omp --version
+    bun install --frozen-lockfile --ignore-scripts
 
-WORKDIR /app
+# Host natives build via the cargo/napi backend (Bazel is only for cross
+# targets). Profile `ci` = release codegen, thin LTO, stripped.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/pi/target \
+    OMP_NATIVE_CARGO_PROFILE=ci bun --cwd=packages/natives run build
 
-# ompweb install (node_modules/ includes the prebuilt .next/ and bin/).
-COPY --from=ompweb-install --chown=app:app /app/node_modules ./node_modules
-COPY --from=ompweb-install --chown=app:app /app/package.json ./package.json
-COPY --from=ompweb-install --chown=app:app /app/package-lock.json ./package-lock.json
+# Mandatory: export/html/index.ts statically imports tool-views.generated.js
+# and its absence breaks both interactive and rpc-ui launch.
+RUN bun --cwd=packages/coding-agent run gen:tool-views
 
-# Entrypoint.
+# Prune build-only trees; docs/ is kept because omp:// URLs resolve
+# ../../../../docs from the coding-agent source tree.
+RUN rm -rf /pi/.git /pi/target /pi/crates /pi/python /pi/bazel \
+           /pi/BUILD.bazel /pi/MODULE.bazel /pi/MODULE.bazel.lock \
+           /pi/.bazelrc /pi/.bazelversion /pi/.bazelignore \
+           /pi/flake.lock /pi/flake.nix /pi/nix /pi/assets \
+           /pi/Dockerfile /pi/.github /pi/node_modules/.cache
+
+RUN set -eux; \
+    mkdir -p /opt/omp; \
+    cp -a /pi /opt/omp/pi; \
+    { \
+      printf '%s\n' '#!/usr/bin/env bash'; \
+      printf '%s\n' 'set -euo pipefail'; \
+      printf '%s\n' 'export PI_ROOT=/opt/omp/pi'; \
+      printf '%s\n' 'exec /usr/local/bin/bun "$PI_ROOT/packages/coding-agent/src/cli.ts" "$@"'; \
+    } > /opt/omp/omp; \
+    chmod 0755 /opt/omp/omp; \
+    printf 'source:%s@%s\n' "${OMP_REF}" "$(cat /pi/.git-resolved)" > /opt/omp/VERSION
+
+# ---- Stage: omp-artifacts (selector) ----
+# An unknown OMP_BUILD fails loudly with Docker's "invalid reference format".
+FROM omp-${OMP_BUILD} AS omp-artifacts
+
+# ---- Stage: runtime ----
+FROM node:${NODE_VERSION} AS runtime
+ARG BUN_VERSION
+ARG UV_VERSION
+ARG OMP_BUILD
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl wget gnupg jq unzip xz-utils less procps sqlite3 \
+        tini gosu git git-lfs openssh-client \
+        python3 python3-venv python3-pip \
+        build-essential g++ make cmake pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI from its apt repo.
+RUN set -eux; \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg; \
+    chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg; \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gh; \
+    rm -rf /var/lib/apt/lists/*
+
+# Docker CLI only — the daemon lives on the host, reached via the mounted socket.
+RUN set -eux; \
+    install -m 0755 -d /etc/apt/keyrings; \
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc; \
+    chmod a+r /etc/apt/keyrings/docker.asc; \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+      > /etc/apt/sources.list.d/docker.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends docker-ce-cli; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s "bun-v${BUN_VERSION}" \
+    && test "$(bun --version)" = "${BUN_VERSION}"
+
+RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" \
+      | env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh \
+    && uv --version
+
+# The node base image ships a `node` user at UID/GID 1000; drop it so the
+# sandbox user owns 1000. The entrypoint remaps both for other hosts.
+RUN userdel -r node 2>/dev/null || true; \
+    groupdel node 2>/dev/null || true; \
+    groupadd -g 1000 omp \
+    && useradd -u 1000 -g 1000 -M -d /home/omp -s /bin/bash omp \
+    && mkdir -p /home/omp/.omp /home/omp/.config /home/omp/.ssh /workspace
+
+# Engine + frontend payloads (root-owned read-only).
+COPY --from=omp-artifacts /opt/omp /opt/omp
+COPY --from=ompweb-builder /src/ompweb /app/ompweb
+RUN install -m 0755 /opt/omp/omp /usr/local/bin/omp \
+    && omp --version
+
+ENV HOME=/home/omp \
+    NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    OMP_WEB_HOSTNAME=0.0.0.0 \
+    OMP_WEB_NO_OPEN=1 \
+    OMP_WEB_OMP_BIN=/usr/local/bin/omp \
+    OMP_SKIP_SETUP=1 \
+    UV_SYSTEM_PYTHON=1 \
+    BUN_INSTALL=/usr/local \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# docker exec lands in the workspace, and process.cwd() fallbacks point here
+# rather than at /app/ompweb.
+WORKDIR /workspace
+RUN chown -R omp:omp /home/omp /workspace
+
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-ENV NODE_ENV=production \
-    NEXT_TELEMETRY_DISABLED=1 \
-    PORT=30177 \
-    OMP_WEB_HOSTNAME=0.0.0.0 \
-    # Redirect omp's HOME-relative writes (~/.omp, ~/.local/share) into
-    # the persistent volume. Without this, omp tries to mkdir /app/.omp
-    # which is root-owned and EACCES for the app user.
-    HOME=/data/omp \
-    PI_CODING_AGENT_DIR=/data/omp \
-    OMP_WEB_OMP_BIN=/usr/local/bin/omp \
-    OMP_WEB_NO_OPEN=1 \
-    OMP_PINNED_VERSION=${OMP_VERSION}
+LABEL org.opencontainers.image.title="ompweb-docker" \
+      org.opencontainers.image.description="Turnkey sandbox: oh-my-pi (omp) agent engine + ompweb web UI" \
+      org.opencontainers.image.source=https://github.com/Heretek-AI/ompweb-docker \
+      org.opencontainers.image.licenses=MIT \
+      com.heretek.omp.build=${OMP_BUILD}
 
-# Pre-create the persistent data dir owned by UID 1001. When a fresh
-# named volume is first mounted at /data, Docker copies this directory
-# (including ownership) into the volume — so UID 1001 owns /data/omp
-# from the very first run, with no root chown needed. (An existing
-# volume created by an older root-running image must be recreated once:
-# `docker volume rm ompweb_data`.)
-RUN mkdir -p /data/omp && chown -R 1001:1001 /data
+EXPOSE 3000
+# Shell form so the runtime PORT is honored; 4xx/5xx fails, a 307 to /login is healthy.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD curl -fsS -o /dev/null "http://127.0.0.1:${PORT:-3000}/" || exit 1
 
-# The entire runtime runs as UID 1001: tini (PID 1), the entrypoint,
-# node, and spawned omp subprocesses. No root, no gosu, no capability
-# requirements — which is what makes this portable across hosts where
-# cap_drop/chown/seclabel behaved differently.
-USER 1001:1001
-EXPOSE 30177
-
-# wget --spider succeeds on any HTTP response (200/404/etc.) so it's a robust
-# liveness probe for the Next.js server, not a deep content check.
-HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
-  CMD wget --spider -q http://127.0.0.1:30177/ || exit 1
-
+# No USER directive: the entrypoint must start as root to chown volumes and
+# drop privileges to `omp` with gosu before any user code runs.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]

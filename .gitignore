@@ -5,6 +5,10 @@
 # Keep the example (it has no secrets).
 !.env.example
 
+# Compose-created state and workspace bind mounts.
+data/
+workspace/
+
 # Local build state.
 node_modules/
 .next/

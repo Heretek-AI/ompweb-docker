@@ -1,54 +1,68 @@
-# docker-compose.yml — quick-start for ompweb + oh-my-pi.
+# docker-compose.yml — quick-start for the omp + ompweb sandbox.
 #
 # 1. cp .env.example .env && edit .env (set OMP_WEB_PASSWORD at least)
-# 2. docker compose pull   # fetch the latest image
-# 3. docker compose up -d
-# 4. open http://localhost:30177
+# 2. mkdir -p workspace data/omp data/config data/ssh && chmod 700 data/ssh
+# 3. docker compose pull
+# 4. docker compose up -d
+# 5. open http://localhost:3000
+#
+# The container starts as root so the entrypoint can remap PUID/PGID, join the
+# Docker socket's group, and chown the mounted volumes; it then drops to the
+# unprivileged `omp` user with gosu before any user code runs.
 
 services:
   ompweb:
-    # Pull from GHCR. Override GHCR_OWNER in .env if you forked this repo.
     image: ghcr.io/${GHCR_OWNER:-heretek-ai}/ompweb-docker:${TAG:-latest}
     container_name: ompweb
     restart: unless-stopped
 
-    # tini is baked into the image's ENTRYPOINT, so we don't need Compose's init.
-
-    # Run entirely as UID 1001 (never root). The image ships /data/omp
-    # owned by UID 1001, and Docker copies it into the fresh named
-    # volume on first mount — so the app user owns its data dir with no
-    # root setup at runtime. That makes cap_drop: ALL safe (nothing in
-    # the container needs a capability) and portable across hosts
-    # (btrfs/seclabel/userns quirks can't break it).
-    user: "1001:1001"
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-
     ports:
-      - "30177:30177"
+      - "${OMPWEB_PORT:-3000}:3000"
 
     env_file:
       - .env
 
-    volumes:
-      # Persistent agent state: omp config, session index, models, etc.
-      - ompweb_data:/data
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
 
-      # OPTIONAL: bind-mount your source code so omp can edit it.
-      # Uncomment the next line and set WORKSPACE_DIR in .env to point at
-      # the directory you want omp to work on.
-      # - ${WORKSPACE_DIR:-./workspace}:/workspace
+    volumes:
+      # Your code — omp's workspace.
+      - ${WORKSPACE_DIR:-./workspace}:/workspace
+      # Agent state: sessions, blobs, projects.json, models.yml, agent.db, skills.
+      - ${OMP_DATA_DIR:-./data/omp}:/home/omp/.omp
+      # Tool config: gh auth, git config.
+      - ${OMP_CONFIG_DIR:-./data/config}:/home/omp/.config
+      # SSH keys, read-only. Use `chmod 700 data/ssh`.
+      - ${OMP_SSH_DIR:-./data/ssh}:/home/omp/.ssh:ro
+      # Docker daemon access via the host socket (client-only CLI in the image).
+      # Docker creates a DIRECTORY at a missing bind source, so hosts without a
+      # daemon should comment this line out.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    # Makes host.docker.internal resolve on Linux (Ollama/vLLM/LM Studio on the host).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # CHOWN/DAC_OVERRIDE/FOWNER for the volume fix-ups, SETUID/SETGID for the
+    # gosu privilege drop. No other capability is needed.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+
+    security_opt:
+      - no-new-privileges:true
+
+    stop_grace_period: 30s
 
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:30177/"]
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:3000/ || exit 1"]
       interval: 30s
-      timeout: 3s
+      timeout: 5s
       retries: 3
-      start_period: 30s
-
-volumes:
-  ompweb_data:
-    # Named volume (managed by Docker, portable across hosts).
-    name: ompweb_data
+      start_period: 60s

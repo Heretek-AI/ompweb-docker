@@ -1,30 +1,54 @@
-# GitHub Actions — auto-build and publish the ompweb image to GHCR.
+# GitHub Actions — build and publish the omp-sandbox image to GHCR.
 #
 # Triggers:
-#   - push to main                      -> tags: main, main-<sha>, latest
-#   - tag matching v*.*.*               -> tags: X.Y.Z, X.Y, X, sha
-#   - pull_request                      -> build only (no push), tag: pr-<num>-<sha>
-#   - workflow_dispatch                 -> manual trigger using current branch
+#   - daily schedule (04:00 UTC)  -> rebuild only when upstream moved
+#   - push to main                -> rebuild only when upstream moved
+#   - workflow_dispatch           -> manual; inputs pick the omp/ompweb repos+refs
+#
+# The image is built natively on two runners (amd64 + arm64) and the digests
+# are merged into one multi-arch tag set.
 
 name: docker
 
 on:
+  schedule:
+    - cron: '0 4 * * *'
   push:
     branches: [main]
-    tags: ['v*.*.*']
-  pull_request:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      omp_repo:
+        description: 'oh-my-pi repository (owner/name)'
+        required: false
+        default: can1357/oh-my-pi
+      omp_ref:
+        description: 'oh-my-pi ref (branch, tag, or SHA)'
+        required: false
+        default: main
+      omp_build:
+        description: 'How to obtain omp: a published release binary, or build from source'
+        type: choice
+        options: [release, source]
+        default: release
+      ompweb_repo:
+        description: 'ompweb repository (owner/name)'
+        required: false
+        default: kahme247/ompweb
+      ompweb_ref:
+        description: 'ompweb ref (branch, tag, or SHA)'
+        required: false
+        default: main
+      push_latest:
+        description: 'Also publish the `latest` tag'
+        type: boolean
+        default: true
+      force:
+        description: 'Rebuild even when the upstream tags are unchanged'
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
-
-# Cancel in-progress runs on the same branch/tag, except for release tags
-# (don't cancel a release that's almost done).
-concurrency:
-  group: docker-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 permissions:
   contents: read
@@ -32,10 +56,18 @@ permissions:
   attestations: write
   id-token: write
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      omp_tag: ${{ steps.resolve.outputs.omp_tag }}
+      ompweb_tag: ${{ steps.resolve.outputs.ompweb_tag }}
+      version_tag: ${{ steps.resolve.outputs.version_tag }}
+      build_needed: ${{ steps.decide.outputs.build_needed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,133 +82,178 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # GHCR stores packages under lowercase org names. Docker's buildx
-      # silently lowercases on push, but Trivy's reference parser is
-      # stricter and rejects 'Heretek-AI' as malformed. Expose the
-      # lowercased name for downstream steps to use.
-      - name: Resolve image name (lowercase)
-        id: image
-        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-
-      # ---- Metadata: branch push to main → main, main-<sha>, latest ----
-      - name: Extract Docker metadata (branch)
-        id: meta-branch
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=main
-            type=raw,value=latest
-            type=sha,format=long
-          labels: |
-            org.opencontainers.image.title=ompweb
-            org.opencontainers.image.description=Containerized oh-my-pi (omp) + ompweb web UI
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.licenses=MIT
-
-      # ---- Metadata: tag push (v*.*.*) → semver + sha ----
-      - name: Extract Docker metadata (tag)
-        id: meta-tag
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha,format=long
-          labels: |
-            org.opencontainers.image.title=ompweb
-            org.opencontainers.image.description=Containerized oh-my-pi (omp) + ompweb web UI
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.licenses=MIT
-
-      # ---- Metadata: pull request → pr-<num>-<sha> (build only, no push) ----
-      - name: Extract Docker metadata (pr)
-        id: meta-pr
-        if: github.event_name == 'pull_request'
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=pr-${{ github.event.pull_request.number }}-{{sha}}
-          labels: |
-            org.opencontainers.image.title=ompweb
-            org.opencontainers.image.description=Containerized oh-my-pi (omp) + ompweb web UI
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.licenses=MIT
-
-      # ---- Metadata: workflow_dispatch → main-<sha> ----
-      - name: Extract Docker metadata (manual)
-        id: meta-manual
-        if: github.event_name == 'workflow_dispatch'
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=manual
-            type=sha,format=long
-          labels: |
-            org.opencontainers.image.title=ompweb
-            org.opencontainers.image.description=Containerized oh-my-pi (omp) + ompweb web UI
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.licenses=MIT
-
-      # Compose the final tag/label list from whichever metadata step ran.
-      # Use bash ${VAR:-fallback} so an empty string falls through cleanly.
-      # Multi-line outputs require GitHub's heredoc form: <<DELIMITER.
-      - name: Collect metadata outputs
-        id: meta
+      - name: Resolve upstream tags
+        id: resolve
         env:
-          BRANCH_TAGS: ${{ steps.meta-branch.outputs.tags }}
-          BRANCH_LABELS: ${{ steps.meta-branch.outputs.labels }}
-          TAG_TAGS: ${{ steps.meta-tag.outputs.tags }}
-          TAG_LABELS: ${{ steps.meta-tag.outputs.labels }}
-          PR_TAGS: ${{ steps.meta-pr.outputs.tags }}
-          PR_LABELS: ${{ steps.meta-pr.outputs.labels }}
-          MANUAL_TAGS: ${{ steps.meta-manual.outputs.tags }}
-          MANUAL_LABELS: ${{ steps.meta-manual.outputs.labels }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OMP_REPO: ${{ inputs.omp_repo || 'can1357/oh-my-pi' }}
+          OMP_REF: ${{ inputs.omp_ref || 'main' }}
+          OMP_BUILD: ${{ inputs.omp_build || 'release' }}
+          OMPWEB_REPO: ${{ inputs.ompweb_repo || 'kahme247/ompweb' }}
+          OMPWEB_REF: ${{ inputs.ompweb_ref || 'main' }}
         run: |
-          TAGS="${BRANCH_TAGS:-${TAG_TAGS:-${PR_TAGS:-${MANUAL_TAGS:-}}}}"
-          LABELS="${BRANCH_LABELS:-${TAG_LABELS:-${PR_LABELS:-${MANUAL_LABELS:-}}}}"
+          set -euo pipefail
+
+          commit_sha() {
+            gh api "repos/$1/commits/$2" --jq '.sha[0:7]'
+          }
+
+          if [ "$OMP_BUILD" = "source" ]; then
+            omp_tag="$(commit_sha "$OMP_REPO" "$OMP_REF")"
+          elif printf '%s' "$OMP_REF" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+            omp_tag="$OMP_REF"
+          else
+            omp_tag="$(gh api "repos/$OMP_REPO/releases/latest" --jq '.tag_name')"
+          fi
+
+          ompweb_tag="$(commit_sha "$OMPWEB_REPO" "$OMPWEB_REF")"
+
+          version_tag="$(printf '%s-%s' "$omp_tag" "$ompweb_tag" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')"
+
           {
-            echo "tags<<__OMPWEB_META_EOF__"
-            echo "${TAGS}"
-            echo "__OMPWEB_META_EOF__"
-            echo "labels<<__OMPWEB_META_EOF__"
-            echo "${LABELS}"
-            echo "__OMPWEB_META_EOF__"
+            echo "omp_tag=${omp_tag}"
+            echo "ompweb_tag=${ompweb_tag}"
+            echo "version_tag=${version_tag}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      - name: Decide whether a build is needed
+        id: decide
+        env:
+          VERSION_TAG: ${{ steps.resolve.outputs.version_tag }}
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${GITHUB_REPOSITORY,,}"
+
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "force requested; building regardless" >&2
+            echo "build_needed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if docker buildx imagetools inspect "${image}:${VERSION_TAG}" >/dev/null 2>&1; then
+            echo "tag ${VERSION_TAG} already published; skipping build" >&2
+            echo "build_needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag ${VERSION_TAG} is missing; building" >&2
+            echo "build_needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.build_needed == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:build-${{ matrix.arch }}
           build-args: |
-            OMPWEB_VERSION=latest
-            OMP_VERSION=latest
-          # Free GHA-backed cache; reduces build time on repeat runs.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          # SLSA provenance + SBOM (requires the `attestations: write` perm).
+            OMP_REPO=${{ inputs.omp_repo || 'can1357/oh-my-pi' }}
+            OMP_REF=${{ inputs.omp_ref || 'main' }}
+            OMP_BUILD=${{ inputs.omp_build || 'release' }}
+            OMPWEB_REPO=${{ inputs.ompweb_repo || 'kahme247/ompweb' }}
+            OMPWEB_REF=${{ inputs.ompweb_ref || 'main' }}
+            BUN_VERSION=1.4.2
+            UV_VERSION=0.12.17
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
           provenance: true
           sbom: true
+          outputs: type=image,push-by-digest=true,name-canonical=true
 
-      - name: Run Trivy vulnerability scanner
-        if: github.event_name != 'pull_request'
-        uses: aquasecurity/trivy-action@v0.36.0
+      - name: Export digest
+        run: |
+          set -euo pipefail
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digest-${{ matrix.arch }}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
         with:
-          # GHCR stores packages under lowercase org names. Docker's buildx
-          # silently lowercases on push, but Trivy's reference parser is
-          # stricter and rejects 'Heretek-AI' as malformed.
-          image-ref: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:latest
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digest-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Merge and tag the multi-arch image
+        env:
+          OMP_TAG: ${{ needs.resolve.outputs.omp_tag }}
+          OMPWEB_TAG: ${{ needs.resolve.outputs.ompweb_tag }}
+          VERSION_TAG: ${{ needs.resolve.outputs.version_tag }}
+          PUSH_LATEST: ${{ github.event_name == 'push' || github.event_name == 'schedule' || inputs.push_latest }}
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${GITHUB_REPOSITORY,,}"
+
+          args=()
+          for digest in /tmp/digests/digest-*; do
+            args+=("${image}@$(cat "$digest")")
+          done
+
+          tags=("${image}:${VERSION_TAG}" "${image}:omp-${OMP_TAG}" "${image}:ompweb-${OMPWEB_TAG}")
+          if [ "$PUSH_LATEST" = "true" ]; then
+            tags+=("${image}:latest")
+          fi
+
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=(--tag "$tag")
+          done
+
+          docker buildx imagetools create "${tag_args[@]}" "${args[@]}"
+
+      - name: Scan the published image
+        # Advisory only: a finding never gates the release.
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.resolve.outputs.version_tag }}
           format: table
           exit-code: '0'
           ignore-unfixed: true
