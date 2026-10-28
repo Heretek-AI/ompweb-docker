@@ -239,6 +239,7 @@ ENV HOME=/home/omp \
     PORT=3000 \
     OMP_WEB_HOSTNAME=0.0.0.0 \
     OMP_WEB_NO_OPEN=1 \
+    OMP_WEB_DISABLE_AUTOUPDATE=1 \
     OMP_WEB_OMP_BIN=/usr/local/bin/omp \
     OMP_SKIP_SETUP=1 \
     UV_SYSTEM_PYTHON=1 \

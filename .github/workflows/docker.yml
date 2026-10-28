@@ -2,7 +2,7 @@
 #
 # Triggers:
 #   - daily schedule (04:00 UTC)  -> rebuild only when upstream moved
-#   - push to main                -> rebuild only when upstream moved
+#   - push to main                -> rebuild wrapper changes
 #   - workflow_dispatch           -> manual; inputs pick the omp/ompweb repos+refs
 #
 # The image is built natively on two runners (amd64 + arm64) and the digests
@@ -65,6 +65,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       omp_tag: ${{ steps.resolve.outputs.omp_tag }}
+      omp_ref: ${{ steps.resolve.outputs.omp_ref }}
+      ompweb_ref: ${{ steps.resolve.outputs.ompweb_ref }}
       ompweb_tag: ${{ steps.resolve.outputs.ompweb_tag }}
       version_tag: ${{ steps.resolve.outputs.version_tag }}
       build_needed: ${{ steps.decide.outputs.build_needed }}
@@ -95,23 +97,28 @@ jobs:
           set -euo pipefail
 
           commit_sha() {
-            gh api "repos/$1/commits/$2" --jq '.sha[0:7]'
+            gh api "repos/$1/commits/$2" --jq '.sha'
           }
 
+          omp_ref="$OMP_REF"
           if [ "$OMP_BUILD" = "source" ]; then
-            omp_tag="$(commit_sha "$OMP_REPO" "$OMP_REF")"
+            omp_ref="$(commit_sha "$OMP_REPO" "$OMP_REF")"
+            omp_tag="${omp_ref:0:7}"
           elif printf '%s' "$OMP_REF" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
             omp_tag="$OMP_REF"
           else
             omp_tag="$(gh api "repos/$OMP_REPO/releases/latest" --jq '.tag_name')"
           fi
 
-          ompweb_tag="$(commit_sha "$OMPWEB_REPO" "$OMPWEB_REF")"
+          ompweb_ref="$(commit_sha "$OMPWEB_REPO" "$OMPWEB_REF")"
+          ompweb_tag="${ompweb_ref:0:7}"
 
           version_tag="$(printf '%s-%s' "$omp_tag" "$ompweb_tag" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g')"
 
           {
             echo "omp_tag=${omp_tag}"
+            echo "omp_ref=${omp_ref}"
+            echo "ompweb_ref=${ompweb_ref}"
             echo "ompweb_tag=${ompweb_tag}"
             echo "version_tag=${version_tag}"
           } >> "$GITHUB_OUTPUT"
@@ -124,8 +131,8 @@ jobs:
           set -euo pipefail
           image="${REGISTRY}/${GITHUB_REPOSITORY,,}"
 
-          if [ "${{ inputs.force }}" = "true" ]; then
-            echo "force requested; building regardless" >&2
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.force }}" = "true" ]; then
+            echo "wrapper push or force requested; building regardless" >&2
             echo "build_needed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -177,10 +184,11 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           build-args: |
             OMP_REPO=${{ inputs.omp_repo || 'can1357/oh-my-pi' }}
-            OMP_REF=${{ inputs.omp_ref || 'main' }}
+            OMP_REF=${{ needs.resolve.outputs.omp_ref }}
             OMP_BUILD=${{ inputs.omp_build || 'release' }}
+            OMP_VERSION=${{ needs.resolve.outputs.omp_tag }}
             OMPWEB_REPO=${{ inputs.ompweb_repo || 'kahme247/ompweb' }}
-            OMPWEB_REF=${{ inputs.ompweb_ref || 'main' }}
+            OMPWEB_REF=${{ needs.resolve.outputs.ompweb_ref }}
             BUN_VERSION=1.4.2
             UV_VERSION=0.12.17
           secrets: |

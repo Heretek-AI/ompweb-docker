@@ -89,6 +89,8 @@ docker build --secret id=github_token,src=<(printf %s "$GITHUB_TOKEN") .
 
 Omitting the secret is valid for public repos.
 
+Docker caches the clone and download steps, so moving refs such as `main` and `latest` may otherwise reuse old content on subsequent local builds. Pass a specific `OMPWEB_REF` commit and, in source mode, an `OMP_REF` commit; in release mode pass a specific `OMP_VERSION` tag. Alternatively, use `docker build --no-cache ...` to resolve moving refs again.
+
 ---
 
 ## `OMP_BUILD=release` vs `OMP_BUILD=source`
@@ -100,7 +102,7 @@ Omitting the secret is valid for public repos.
 | Works for | Any published release. | Arbitrary refs, forks, and unreleased commits. |
 | Requirement | A release must exist for the tag. | The Rust toolchain in the builder (already in the `omp-source` stage). |
 
-`OMP_REF` does not participate in release mode: when it is not itself version-shaped, the newest release is used and the build prints `WARNING: OMP_BUILD=release ignores OMP_REF; using latest release <tag>`. Use `OMP_BUILD=source` when you need the exact commit.
+In release mode, an explicit `OMP_VERSION` takes precedence. With `OMP_VERSION=latest`, a version-shaped `OMP_REF` selects that release; otherwise the newest release is used and the build prints `WARNING: OMP_BUILD=release ignores OMP_REF; using latest release <tag>`. Use `OMP_BUILD=source` when you need an exact source commit.
 
 ---
 
@@ -205,6 +207,8 @@ On first start the entrypoint writes `/home/omp/.omp/agent/projects.json` with t
 
 ## Updating and image tags
 
+The image disables ompweb's in-app updates for both the UI and the engine with `OMP_WEB_DISABLE_AUTOUPDATE=1`. Update by pulling a newly published image and recreating the container; restarting an existing container alone does not install a new image. Persistent volumes are retained.
+
 ```sh
 docker compose pull
 docker compose up -d
@@ -214,12 +218,12 @@ The workflow publishes four tag families:
 
 | Tag | Meaning |
 |---|---|
-| `latest` | Newest successful build (push to `main`, daily schedule, or dispatch with `push_latest`). |
-| `<omp_tag>-<ompweb_tag>` | Exact pair, e.g. `v18.2.7-1a2b3c4`. Immutable; use for reproducibility. |
+| `latest` | Most recently published build tagged `latest` (push to `main`, scheduled update, or dispatch with `push_latest`). |
+| `<omp_tag>-<ompweb_tag>` | Resolved upstream pair, e.g. `v18.2.7-1a2b3c4`. Wrapper changes or forced rebuilds can replace this tag; pin an image digest for reproducibility. |
 | `omp-<omp_tag>` | Tracks the engine only. |
 | `ompweb-<ompweb_tag>` | Tracks the UI only. |
 
-CI resolves the upstream commits on each run and skips the build when the resulting version tag is already published — the daily cron is a no-op unless upstream moved. Dispatch `.github/workflows/docker.yml` manually to pick repos/refs, choose `release` vs `source`, or force a rebuild.
+CI resolves the release tag or source commit and the UI commit before building, then passes those exact versions to both architecture builds. Scheduled runs skip builds when the resulting version tag already exists; pushes to `main` rebuild even when upstream versions have not changed, so wrapper changes are published. Dispatch `.github/workflows/docker.yml` manually to pick repos/refs, choose `release` vs `source`, or force a rebuild.
 
 ---
 
